@@ -1,0 +1,17 @@
+[workspace]
+members = ["lxst-core", "lxst"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/lelloman/lxst-rs"
+authors = ["lxst-rs contributors"]
+
+[workspace.dependencies]
+lxst-core = { version = "0.1.0", path = "lxst-core" }
+rns-core = { path = "../rns-rs/rns-core", features = ["std"] }
+rns-net = { path = "../rns-rs/rns-net" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
