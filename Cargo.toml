@@ -1,5 +1,5 @@
 [workspace]
-members = ["lxst-core", "lxst"]
+members = ["lxst-core", "lxst", "rnphone"]
 resolver = "2"
 
 [workspace.package]

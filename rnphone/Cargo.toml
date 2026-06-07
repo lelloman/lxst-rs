@@ -1,0 +1,12 @@
+[package]
+name = "rnphone"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+lxst.workspace = true
+rns-crypto.workspace = true
+rns-net.workspace = true
