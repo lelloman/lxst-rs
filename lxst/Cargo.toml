@@ -2,12 +2,13 @@
 name = "lxst"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 
 [dependencies]
 lxst-core.workspace = true
 rns-core.workspace = true
+rns-crypto.workspace = true
 rns-net.workspace = true
 thiserror.workspace = true

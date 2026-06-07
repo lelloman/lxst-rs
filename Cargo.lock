@@ -279,6 +279,7 @@ version = "0.1.0"
 dependencies = [
  "lxst-core",
  "rns-core",
+ "rns-crypto",
  "rns-net",
  "thiserror",
 ]
@@ -287,6 +288,7 @@ dependencies = [
 name = "lxst-core"
 version = "0.1.0"
 dependencies = [
+ "rns-core",
  "serde",
  "thiserror",
 ]
@@ -364,6 +366,8 @@ dependencies = [
 [[package]]
 name = "rns-core"
 version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60e6a35f1558c4c5df1a522c474839b12806987bfc52beff61578e65dafffc96"
 dependencies = [
  "log",
  "rns-crypto",
@@ -372,6 +376,8 @@ dependencies = [
 [[package]]
 name = "rns-crypto"
 version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e505ccfe10b76928ee794246aef765ee56230c6596861e2780aaac8962450ef"
 dependencies = [
  "aes",
  "cbc",
@@ -384,6 +390,8 @@ dependencies = [
 [[package]]
 name = "rns-net"
 version = "0.5.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7a315863b29f2bd547334731fb626dd64f2709752dd9b501c76f7d8d47f4540"
 dependencies = [
  "bzip2",
  "libc",

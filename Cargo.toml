@@ -5,13 +5,15 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license-file = "LICENSE"
 repository = "https://github.com/lelloman/lxst-rs"
 authors = ["lxst-rs contributors"]
 
 [workspace.dependencies]
 lxst-core = { version = "0.1.0", path = "lxst-core" }
-rns-core = { path = "../rns-rs/rns-core", features = ["std"] }
-rns-net = { path = "../rns-rs/rns-net" }
+lxst = { version = "0.1.0", path = "lxst" }
+rns-core = { version = "=0.1.13", features = ["std"] }
+rns-crypto = "=0.1.8"
+rns-net = "=0.5.10"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
