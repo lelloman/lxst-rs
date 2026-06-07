@@ -1,12 +1,32 @@
 //! High-level LXST Rust API.
 
+pub mod audio;
+pub mod codec;
+pub mod network;
+pub mod telephony;
+
 pub use lxst_core as core;
 
-pub use lxst_core::{CallProfile, CodecKind, CodecProfile, FrameDuration, Signal, SignalCode};
+pub use audio::{Agc, AudioFrame, BandPass, HighPass, LowPass, Mixer, ToneSource};
+pub use codec::{
+    AudioCodec, Codec2Codec, CodecError, CodecFactory, CodecSelection, CodecState, NullCodec,
+    OpusCodec, RawCodec,
+};
+pub use network::{LxstLinkSender, TelephonyEndpoint};
+
+pub use lxst_core::{
+    CallProfile, CodecHeader, CodecKind, CodecProfile, EncodedFrame, FrameDuration, LxstPacket,
+    PacketError, RawBitDepth, RawFrameHeader, Signal, SignalCode,
+};
+pub use telephony::{CallEvent, CallState, CallerPolicy, Telephone, TelephoneConfig};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    #[error(transparent)]
+    Codec(#[from] CodecError),
+    #[error(transparent)]
+    Packet(#[from] PacketError),
     #[error("operation is not implemented yet")]
     NotImplemented,
 }
