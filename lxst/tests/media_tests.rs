@@ -1,4 +1,5 @@
 use std::fs;
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lxst::{
@@ -110,6 +111,32 @@ fn queued_opus_file_sink_drains_and_finalizes_on_stop() {
 
     let source = OpusFileSource::open(&path, 20, false).unwrap();
     assert!(source.len_samples() >= 960 * 10);
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn opus_file_source_timed_mode_waits_between_frames() {
+    let path = temp_opus_path("timed-source");
+    let frame = AudioFrame::new(48_000, 2, vec![0.0; 960 * 2]).unwrap();
+
+    {
+        let mut sink = OpusFileSink::create(&path, CodecProfile::OpusAudioMax).unwrap();
+        sink.handle_frame(&frame).unwrap();
+        sink.handle_frame(&frame).unwrap();
+        sink.finalize().unwrap();
+    }
+
+    let mut source = OpusFileSource::open_timed(&path, 20, false, true).unwrap();
+    assert!(source.timed());
+    assert_eq!(source.frame_time(), Duration::from_millis(20));
+
+    source.start();
+    assert!(source.next_frame().unwrap().is_some());
+    assert!(source.next_frame().unwrap().is_none());
+
+    thread::sleep(source.frame_time() + Duration::from_millis(5));
+    assert!(source.next_frame().unwrap().is_some());
 
     let _ = fs::remove_file(path);
 }

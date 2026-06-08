@@ -7,7 +7,7 @@ use std::sync::{
     Arc, Condvar, Mutex,
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lxst_core::CodecProfile;
 use ogg::{PacketReader, PacketWriteEndInfo, PacketWriter};
@@ -315,9 +315,12 @@ pub struct OpusFileSource {
     channels: u8,
     samples: Vec<f32>,
     samples_per_frame: usize,
+    frame_time: Duration,
     position: usize,
     running: bool,
     looping: bool,
+    timed: bool,
+    next_frame_at: Option<Instant>,
 }
 
 impl OpusFileSource {
@@ -325,6 +328,15 @@ impl OpusFileSource {
         path: impl AsRef<Path>,
         target_frame_ms: u16,
         looping: bool,
+    ) -> Result<Self, MediaError> {
+        Self::open_timed(path, target_frame_ms, looping, false)
+    }
+
+    pub fn open_timed(
+        path: impl AsRef<Path>,
+        target_frame_ms: u16,
+        looping: bool,
+        timed: bool,
     ) -> Result<Self, MediaError> {
         let file = File::open(path.as_ref())?;
         let mut reader = PacketReader::new(file);
@@ -350,14 +362,19 @@ impl OpusFileSource {
             samples.drain(..preskip);
         }
         let samples_per_frame = samples_per_frame(header.input_samplerate, target_frame_ms).max(1);
+        let frame_time =
+            Duration::from_secs_f64(samples_per_frame as f64 / header.input_samplerate as f64);
         Ok(Self {
             samplerate: header.input_samplerate,
             channels: header.channels,
             samples,
             samples_per_frame,
+            frame_time,
             position: 0,
             running: false,
             looping,
+            timed,
+            next_frame_at: None,
         })
     }
 
@@ -368,15 +385,38 @@ impl OpusFileSource {
     pub fn duration(&self) -> Duration {
         Duration::from_secs_f64(self.len_samples() as f64 / self.samplerate as f64)
     }
+
+    pub fn frame_time(&self) -> Duration {
+        self.frame_time
+    }
+
+    pub fn timed(&self) -> bool {
+        self.timed
+    }
+
+    pub fn set_timed(&mut self, timed: bool) {
+        self.timed = timed;
+        self.next_frame_at = if timed && self.running {
+            Some(Instant::now())
+        } else {
+            None
+        };
+    }
 }
 
 impl AudioSource for OpusFileSource {
     fn start(&mut self) {
         self.running = true;
+        self.next_frame_at = if self.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
     }
 
     fn stop(&mut self) {
         self.running = false;
+        self.next_frame_at = None;
     }
 
     fn is_running(&self) -> bool {
@@ -395,6 +435,13 @@ impl AudioSource for OpusFileSource {
         if !self.running {
             return Ok(None);
         }
+        if self.timed {
+            if let Some(next_frame_at) = self.next_frame_at {
+                if Instant::now() < next_frame_at {
+                    return Ok(None);
+                }
+            }
+        }
         if self.position >= self.len_samples() {
             if self.looping {
                 self.position = 0;
@@ -408,6 +455,9 @@ impl AudioSource for OpusFileSource {
         let end_frame = (self.position + self.samples_per_frame).min(self.len_samples());
         let end = end_frame * channels;
         self.position = end_frame;
+        if self.timed {
+            self.next_frame_at = Some(Instant::now() + self.frame_time);
+        }
         Ok(Some(AudioFrame::new(
             self.samplerate,
             self.channels,
