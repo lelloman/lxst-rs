@@ -31,6 +31,29 @@ fn raw_codec_rejects_unsupported_float16_encode() {
 }
 
 #[test]
+fn audio_frame_normalizes_channels_for_device_output() {
+    let mono = AudioFrame::new(48_000, 1, vec![0.25, -0.5]).unwrap();
+    let stereo = mono.with_channels(2).unwrap();
+
+    assert_eq!(stereo.channels(), 2);
+    assert_eq!(stereo.samples(), &[0.25, 0.25, -0.5, -0.5]);
+
+    let folded = stereo.with_channels(1).unwrap();
+    assert_eq!(folded.channels(), 1);
+    assert_eq!(folded.samples(), &[0.25, -0.5]);
+}
+
+#[test]
+fn audio_frame_resamples_for_device_output() {
+    let frame = AudioFrame::new(8_000, 1, vec![0.0; 80]).unwrap();
+    let resampled = frame.resampled(16_000).unwrap();
+
+    assert_eq!(resampled.samplerate(), 16_000);
+    assert_eq!(resampled.channels(), 1);
+    assert_eq!(resampled.frame_count(), 160);
+}
+
+#[test]
 fn opus_codec_round_trips_voice_frame() {
     let samples: Vec<f32> = (0..160)
         .map(|n| ((n as f32 / 8_000.0) * 440.0 * std::f32::consts::TAU).sin() * 0.2)

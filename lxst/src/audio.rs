@@ -1,7 +1,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::f32::consts::PI;
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 
-use cpal::traits::{DeviceTrait, HostTrait};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioFrame {
@@ -74,6 +76,21 @@ impl AudioFrame {
         self.map_samples(|sample| sample * gain)
     }
 
+    pub fn with_channels(&self, channels: u8) -> Result<Self, AudioError> {
+        let samples = normalize_audio_channels(self.samples(), self.channels(), channels)?;
+        Self::new(self.samplerate(), channels, samples)
+    }
+
+    pub fn resampled(&self, samplerate: u32) -> Result<Self, AudioError> {
+        let samples = resample_audio_linear(
+            self.samples(),
+            self.channels(),
+            self.samplerate(),
+            samplerate,
+        )?;
+        Self::new(samplerate, self.channels(), samples)
+    }
+
     pub fn clipped(mut self) -> Self {
         for sample in &mut self.samples {
             *sample = sample.clamp(-1.0, 1.0);
@@ -92,6 +109,12 @@ pub enum AudioError {
     SampleCountNotDivisible { samples: usize, channels: u8 },
     #[error("audio frames are incompatible")]
     IncompatibleFrames,
+    #[error("no {0:?} audio device is available")]
+    NoDevice(AudioDeviceKind),
+    #[error("unsupported audio device format: {0}")]
+    UnsupportedDeviceFormat(String),
+    #[error("audio stream error: {0}")]
+    Stream(String),
     #[error("audio device error: {0}")]
     Device(String),
 }
@@ -466,6 +489,276 @@ pub struct ToneSource {
     gain: f32,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CpalInputConfig {
+    pub preferred_device: Option<String>,
+    pub target_frame_ms: u16,
+    pub gain_db: f32,
+    pub ease_in: Duration,
+    pub skip: Duration,
+    pub max_queued_frames: usize,
+}
+
+impl Default for CpalInputConfig {
+    fn default() -> Self {
+        Self {
+            preferred_device: None,
+            target_frame_ms: 80,
+            gain_db: 0.0,
+            ease_in: Duration::ZERO,
+            skip: Duration::ZERO,
+            max_queued_frames: 128,
+        }
+    }
+}
+
+pub struct CpalInputSource {
+    samplerate: u32,
+    channels: u8,
+    stream: cpal::Stream,
+    rx: mpsc::Receiver<AudioFrame>,
+    running: bool,
+    filters: Vec<Box<dyn AudioFilter>>,
+    gain_db: f32,
+    target_gain: f32,
+    ease_samples: usize,
+    skip_samples: usize,
+    processed_samples: usize,
+}
+
+impl CpalInputSource {
+    pub fn new(config: CpalInputConfig) -> Result<Self, AudioError> {
+        let device = select_device(AudioDeviceKind::Input, config.preferred_device.as_deref())?;
+        let supported_config = device
+            .default_input_config()
+            .map_err(|err| AudioError::Device(err.to_string()))?;
+        let samplerate = supported_config.sample_rate();
+        let channels = u8::try_from(supported_config.channels())
+            .map_err(|_| AudioError::InvalidChannels(u8::MAX))?;
+        let samples_per_frame = samples_per_frame(samplerate, channels, config.target_frame_ms);
+        let (tx, rx) = mpsc::sync_channel(config.max_queued_frames.max(1));
+        let stream_config = supported_config.config();
+        let stream = match supported_config.sample_format() {
+            cpal::SampleFormat::F32 => {
+                build_input_stream::<f32>(&device, &stream_config, samples_per_frame, tx)?
+            }
+            cpal::SampleFormat::I16 => {
+                build_input_stream::<i16>(&device, &stream_config, samples_per_frame, tx)?
+            }
+            cpal::SampleFormat::U16 => {
+                build_input_stream::<u16>(&device, &stream_config, samples_per_frame, tx)?
+            }
+            other => {
+                return Err(AudioError::UnsupportedDeviceFormat(other.to_string()));
+            }
+        };
+        let target_gain = linear_gain(config.gain_db);
+        let ease_samples = duration_samples(config.ease_in, samplerate, channels);
+        let skip_samples = duration_samples(config.skip, samplerate, channels);
+        Ok(Self {
+            samplerate,
+            channels,
+            stream,
+            rx,
+            running: false,
+            filters: Vec::new(),
+            gain_db: config.gain_db,
+            target_gain,
+            ease_samples,
+            skip_samples,
+            processed_samples: 0,
+        })
+    }
+
+    pub fn add_filter(&mut self, filter: impl AudioFilter + 'static) {
+        self.filters.push(Box::new(filter));
+    }
+
+    pub fn gain_db(&self) -> f32 {
+        self.gain_db
+    }
+}
+
+impl crate::pipeline::AudioSource for CpalInputSource {
+    fn start(&mut self) {
+        if self.stream.play().is_ok() {
+            self.running = true;
+        }
+    }
+
+    fn stop(&mut self) {
+        let _ = self.stream.pause();
+        self.running = false;
+    }
+
+    fn is_running(&self) -> bool {
+        self.running
+    }
+
+    fn samplerate(&self) -> u32 {
+        self.samplerate
+    }
+
+    fn channels(&self) -> u8 {
+        self.channels
+    }
+
+    fn next_frame(&mut self) -> Result<Option<AudioFrame>, crate::pipeline::PipelineError> {
+        if !self.running {
+            return Ok(None);
+        }
+        let Ok(mut frame) = self.rx.try_recv() else {
+            return Ok(None);
+        };
+        if self.processed_samples < self.skip_samples {
+            self.processed_samples += frame.samples().len();
+            return Ok(None);
+        }
+        for filter in &mut self.filters {
+            frame = filter.process(frame);
+        }
+        if self.target_gain != 1.0 {
+            let samples = frame.samples_mut();
+            for sample in samples.iter_mut() {
+                let ease_gain = if self.ease_samples == 0 {
+                    self.target_gain
+                } else {
+                    let progress =
+                        (self.processed_samples as f32 / self.ease_samples as f32).clamp(0.0, 1.0);
+                    self.target_gain * progress
+                };
+                *sample *= ease_gain;
+                self.processed_samples += 1;
+            }
+        } else {
+            self.processed_samples += frame.samples().len();
+        }
+        Ok(Some(frame.clipped()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CpalOutputConfig {
+    pub preferred_device: Option<String>,
+    pub max_queued_frames: usize,
+    pub low_latency: bool,
+}
+
+impl Default for CpalOutputConfig {
+    fn default() -> Self {
+        Self {
+            preferred_device: None,
+            max_queued_frames: 64,
+            low_latency: false,
+        }
+    }
+}
+
+pub struct CpalOutputSink {
+    samplerate: u32,
+    channels: u8,
+    max_queued_frames: usize,
+    stream: cpal::Stream,
+    queue: Arc<Mutex<VecDeque<AudioFrame>>>,
+    running: bool,
+}
+
+impl CpalOutputSink {
+    pub fn new(config: CpalOutputConfig) -> Result<Self, AudioError> {
+        let device = select_device(AudioDeviceKind::Output, config.preferred_device.as_deref())?;
+        let supported_config = device
+            .default_output_config()
+            .map_err(|err| AudioError::Device(err.to_string()))?;
+        let samplerate = supported_config.sample_rate();
+        let channels = u8::try_from(supported_config.channels())
+            .map_err(|_| AudioError::InvalidChannels(u8::MAX))?;
+        let mut stream_config = supported_config.config();
+        if config.low_latency {
+            stream_config.buffer_size = cpal::BufferSize::Fixed(128);
+        }
+        let queue = Arc::new(Mutex::new(VecDeque::with_capacity(
+            config.max_queued_frames.max(1),
+        )));
+        let stream = match supported_config.sample_format() {
+            cpal::SampleFormat::F32 => {
+                build_output_stream::<f32>(&device, &stream_config, queue.clone())?
+            }
+            cpal::SampleFormat::I16 => {
+                build_output_stream::<i16>(&device, &stream_config, queue.clone())?
+            }
+            cpal::SampleFormat::U16 => {
+                build_output_stream::<u16>(&device, &stream_config, queue.clone())?
+            }
+            other => {
+                return Err(AudioError::UnsupportedDeviceFormat(other.to_string()));
+            }
+        };
+        Ok(Self {
+            samplerate,
+            channels,
+            max_queued_frames: config.max_queued_frames.max(1),
+            stream,
+            queue,
+            running: false,
+        })
+    }
+
+    pub fn start(&mut self) -> Result<(), AudioError> {
+        self.stream
+            .play()
+            .map_err(|err| AudioError::Stream(err.to_string()))?;
+        self.running = true;
+        Ok(())
+    }
+
+    pub fn stop(&mut self) -> Result<(), AudioError> {
+        self.stream
+            .pause()
+            .map_err(|err| AudioError::Stream(err.to_string()))?;
+        self.running = false;
+        Ok(())
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
+
+    pub fn samplerate(&self) -> u32 {
+        self.samplerate
+    }
+
+    pub fn channels(&self) -> u8 {
+        self.channels
+    }
+
+    pub fn can_receive(&self) -> bool {
+        self.queue
+            .lock()
+            .map(|queue| queue.len() < self.max_queued_frames)
+            .unwrap_or(false)
+    }
+
+    pub fn queued_frames(&self) -> usize {
+        self.queue.lock().map(|queue| queue.len()).unwrap_or(0)
+    }
+
+    pub fn handle_frame(&mut self, frame: AudioFrame) -> Result<(), AudioError> {
+        let frame = frame
+            .with_channels(self.channels)?
+            .resampled(self.samplerate)?
+            .clipped();
+        let mut queue = self
+            .queue
+            .lock()
+            .map_err(|err| AudioError::Stream(err.to_string()))?;
+        if queue.len() >= self.max_queued_frames {
+            return Err(AudioError::Stream("audio output queue is full".to_string()));
+        }
+        queue.push_back(frame);
+        Ok(())
+    }
+}
+
 impl ToneSource {
     pub fn new(frequency: f32, samplerate: u32, channels: u8, gain: f32) -> Self {
         Self {
@@ -598,4 +891,231 @@ fn stream_config_info(config: cpal::SupportedStreamConfigRange) -> AudioStreamCo
         max_sample_rate: config.max_sample_rate(),
         buffer_size,
     }
+}
+
+fn select_device(
+    kind: AudioDeviceKind,
+    preferred_name: Option<&str>,
+) -> Result<cpal::Device, AudioError> {
+    let host = cpal::default_host();
+    if let Some(preferred_name) = preferred_name {
+        let devices = match kind {
+            AudioDeviceKind::Input => host.input_devices(),
+            AudioDeviceKind::Output => host.output_devices(),
+        }
+        .map_err(|err| AudioError::Device(err.to_string()))?;
+        for device in devices {
+            if device.to_string() == preferred_name {
+                return Ok(device);
+            }
+        }
+    }
+    match kind {
+        AudioDeviceKind::Input => host.default_input_device(),
+        AudioDeviceKind::Output => host.default_output_device(),
+    }
+    .ok_or(AudioError::NoDevice(kind))
+}
+
+fn build_input_stream<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    samples_per_frame: usize,
+    tx: mpsc::SyncSender<AudioFrame>,
+) -> Result<cpal::Stream, AudioError>
+where
+    T: cpal::SizedSample + CpalSampleToF32,
+{
+    let samplerate = config.sample_rate;
+    let channels =
+        u8::try_from(config.channels).map_err(|_| AudioError::InvalidChannels(u8::MAX))?;
+    let pending = Arc::new(Mutex::new(Vec::with_capacity(samples_per_frame)));
+    let callback_pending = pending.clone();
+    device
+        .build_input_stream(
+            *config,
+            move |data: &[T], _| {
+                let Ok(mut pending) = callback_pending.lock() else {
+                    return;
+                };
+                for sample in data {
+                    pending.push(sample.to_f32_sample());
+                    if pending.len() >= samples_per_frame {
+                        let frame_samples: Vec<f32> = pending.drain(..samples_per_frame).collect();
+                        if let Ok(frame) = AudioFrame::new(samplerate, channels, frame_samples) {
+                            let _ = tx.try_send(frame);
+                        }
+                    }
+                }
+            },
+            move |err| {
+                eprintln!("lxst input stream error: {err}");
+            },
+            None,
+        )
+        .map_err(|err| AudioError::Stream(err.to_string()))
+}
+
+fn build_output_stream<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    queue: Arc<Mutex<VecDeque<AudioFrame>>>,
+) -> Result<cpal::Stream, AudioError>
+where
+    T: cpal::SizedSample + CpalSampleFromF32,
+{
+    let channels = usize::from(config.channels);
+    let mut pending = VecDeque::<f32>::new();
+    device
+        .build_output_stream(
+            *config,
+            move |data: &mut [T], _| {
+                for sample in data.iter_mut() {
+                    if pending.is_empty() {
+                        if let Ok(mut queue) = queue.lock() {
+                            if let Some(frame) = queue.pop_front() {
+                                pending.extend(frame.samples().iter().copied());
+                            }
+                        }
+                    }
+                    let value = pending.pop_front().unwrap_or(0.0);
+                    *sample = T::from_f32_sample(value);
+                }
+                let remainder = data.len() % channels;
+                if remainder != 0 {
+                    let start = data.len() - remainder;
+                    for sample in &mut data[start..] {
+                        *sample = T::from_f32_sample(0.0);
+                    }
+                }
+            },
+            move |err| {
+                eprintln!("lxst output stream error: {err}");
+            },
+            None,
+        )
+        .map_err(|err| AudioError::Stream(err.to_string()))
+}
+
+trait CpalSampleToF32 {
+    fn to_f32_sample(&self) -> f32;
+}
+
+impl CpalSampleToF32 for f32 {
+    fn to_f32_sample(&self) -> f32 {
+        *self
+    }
+}
+
+impl CpalSampleToF32 for i16 {
+    fn to_f32_sample(&self) -> f32 {
+        *self as f32 / i16::MAX as f32
+    }
+}
+
+impl CpalSampleToF32 for u16 {
+    fn to_f32_sample(&self) -> f32 {
+        (*self as f32 - 32768.0) / 32768.0
+    }
+}
+
+trait CpalSampleFromF32 {
+    fn from_f32_sample(sample: f32) -> Self;
+}
+
+impl CpalSampleFromF32 for f32 {
+    fn from_f32_sample(sample: f32) -> Self {
+        sample.clamp(-1.0, 1.0)
+    }
+}
+
+impl CpalSampleFromF32 for i16 {
+    fn from_f32_sample(sample: f32) -> Self {
+        (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
+    }
+}
+
+impl CpalSampleFromF32 for u16 {
+    fn from_f32_sample(sample: f32) -> Self {
+        ((sample.clamp(-1.0, 1.0) * 32767.0) + 32768.0) as u16
+    }
+}
+
+fn samples_per_frame(samplerate: u32, channels: u8, target_frame_ms: u16) -> usize {
+    let frames = ((samplerate as u64 * target_frame_ms.max(1) as u64).div_ceil(1000)) as usize;
+    frames * channels as usize
+}
+
+fn duration_samples(duration: Duration, samplerate: u32, channels: u8) -> usize {
+    ((duration.as_secs_f64() * samplerate as f64).ceil() as usize) * channels as usize
+}
+
+fn linear_gain(gain_db: f32) -> f32 {
+    if gain_db == 0.0 {
+        1.0
+    } else {
+        10.0_f32.powf(gain_db / 10.0)
+    }
+}
+
+fn normalize_audio_channels(
+    samples: &[f32],
+    input_channels: u8,
+    output_channels: u8,
+) -> Result<Vec<f32>, AudioError> {
+    if input_channels == 0 {
+        return Err(AudioError::InvalidChannels(input_channels));
+    }
+    if output_channels == 0 {
+        return Err(AudioError::InvalidChannels(output_channels));
+    }
+    let input_channels = input_channels as usize;
+    let output_channels = output_channels as usize;
+    let frames = samples.len() / input_channels;
+    let mut normalized = Vec::with_capacity(frames * output_channels);
+    for frame in 0..frames {
+        let base = frame * input_channels;
+        for channel in 0..output_channels {
+            normalized.push(samples[base + channel.min(input_channels - 1)]);
+        }
+    }
+    Ok(normalized)
+}
+
+fn resample_audio_linear(
+    samples: &[f32],
+    channels: u8,
+    input_rate: u32,
+    output_rate: u32,
+) -> Result<Vec<f32>, AudioError> {
+    if input_rate == 0 {
+        return Err(AudioError::InvalidSamplerate(input_rate));
+    }
+    if output_rate == 0 {
+        return Err(AudioError::InvalidSamplerate(output_rate));
+    }
+    if input_rate == output_rate {
+        return Ok(samples.to_vec());
+    }
+    let channels = channels as usize;
+    if samples.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input_frames = samples.len() / channels;
+    let output_frames =
+        ((input_frames as u64 * output_rate as u64) + input_rate as u64 / 2) / input_rate as u64;
+    let output_frames = output_frames.max(1) as usize;
+    let mut out = Vec::with_capacity(output_frames * channels);
+    for out_frame in 0..output_frames {
+        let position = out_frame as f64 * input_rate as f64 / output_rate as f64;
+        let left = position.floor() as usize;
+        let right = (left + 1).min(input_frames - 1);
+        let frac = (position - left as f64) as f32;
+        for channel in 0..channels {
+            let a = samples[left * channels + channel];
+            let b = samples[right * channels + channel];
+            out.push(a + (b - a) * frac);
+        }
+    }
+    Ok(out)
 }

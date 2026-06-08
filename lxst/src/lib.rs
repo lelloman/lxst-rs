@@ -10,7 +10,8 @@ pub use lxst_core as core;
 
 pub use audio::{
     list_audio_devices, Agc, AudioDeviceInfo, AudioDeviceKind, AudioError, AudioFrame,
-    AudioStreamConfigInfo, BandPass, HighPass, LowPass, Mixer, ToneSource,
+    AudioStreamConfigInfo, BandPass, CpalInputConfig, CpalInputSource, CpalOutputConfig,
+    CpalOutputSink, HighPass, LowPass, Mixer, ToneSource,
 };
 pub use codec::{
     AudioCodec, Codec2Codec, CodecError, CodecFactory, CodecSelection, CodecState, NullCodec,
