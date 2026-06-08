@@ -5,6 +5,7 @@ use lxst::{
     ToneSource,
 };
 use lxst_core::CodecProfile;
+use std::time::Duration;
 
 #[test]
 fn raw_codec_round_trips_f32_frames() {
@@ -223,4 +224,51 @@ fn telephone_busy_signal_returns_to_available() {
     assert!(telephone.begin_outgoing_call(remote));
     telephone.apply_signal(Signal::Code(SignalCode::Busy));
     assert_eq!(telephone.state(), CallState::Available);
+}
+
+#[test]
+fn telephone_external_busy_blocks_incoming_calls() {
+    let caller = [0x44; 16];
+    let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
+    telephone.set_busy(true);
+
+    assert!(!telephone.begin_incoming_call(caller));
+    assert_eq!(telephone.state(), CallState::Available);
+    assert!(matches!(
+        rx.recv().unwrap(),
+        lxst::telephony::CallEvent::Busy {
+            identity_hash: Some(identity)
+        } if identity == caller
+    ));
+}
+
+#[test]
+fn telephone_tick_times_out_pending_call() {
+    let remote = [0x55; 16];
+    let config = TelephoneConfig {
+        wait_time: Duration::ZERO,
+        ..TelephoneConfig::default()
+    };
+    let (mut telephone, rx) = Telephone::new(config);
+
+    assert!(telephone.begin_outgoing_call(remote));
+    telephone.tick();
+    assert_eq!(telephone.state(), CallState::Available);
+    assert!(rx
+        .try_iter()
+        .any(|event| matches!(event, lxst::telephony::CallEvent::TimedOut { .. })));
+}
+
+#[test]
+fn telephone_tick_auto_answers_ringing_call() {
+    let caller = [0x66; 16];
+    let config = TelephoneConfig {
+        auto_answer_after: Some(Duration::ZERO),
+        ..TelephoneConfig::default()
+    };
+    let (mut telephone, _rx) = Telephone::new(config);
+
+    assert!(telephone.begin_incoming_call(caller));
+    telephone.tick();
+    assert_eq!(telephone.state(), CallState::Connecting);
 }

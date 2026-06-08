@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lxst_core::{CallProfile, Signal, SignalCode};
 
@@ -16,6 +16,7 @@ pub struct TelephoneConfig {
     pub receive_gain_db: i16,
     pub transmit_gain_db: i16,
     pub use_agc: bool,
+    pub auto_answer_after: Option<Duration>,
 }
 
 impl Default for TelephoneConfig {
@@ -31,6 +32,7 @@ impl Default for TelephoneConfig {
             receive_gain_db: 0,
             transmit_gain_db: 0,
             use_agc: true,
+            auto_answer_after: None,
         }
     }
 }
@@ -66,11 +68,25 @@ pub enum CallState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallEvent {
     StateChanged(CallState),
-    IncomingCall { identity_hash: [u8; 16] },
-    CallEstablished { identity_hash: [u8; 16] },
-    CallEnded { identity_hash: Option<[u8; 16]> },
-    Busy { identity_hash: Option<[u8; 16]> },
-    Rejected { identity_hash: Option<[u8; 16]> },
+    IncomingCall {
+        identity_hash: [u8; 16],
+    },
+    CallEstablished {
+        identity_hash: [u8; 16],
+    },
+    CallEnded {
+        identity_hash: Option<[u8; 16]>,
+    },
+    Busy {
+        identity_hash: Option<[u8; 16]>,
+    },
+    Rejected {
+        identity_hash: Option<[u8; 16]>,
+    },
+    TimedOut {
+        identity_hash: Option<[u8; 16]>,
+        state: CallState,
+    },
     ProfileChanged(CallProfile),
     SignalReceived(Signal),
 }
@@ -81,6 +97,9 @@ pub struct Telephone {
     state: CallState,
     active_identity: Option<[u8; 16]>,
     active_profile: CallProfile,
+    external_busy: bool,
+    call_deadline: Option<Instant>,
+    auto_answer_deadline: Option<Instant>,
     events: mpsc::Sender<CallEvent>,
 }
 
@@ -94,6 +113,9 @@ impl Telephone {
                 state: CallState::Available,
                 active_identity: None,
                 active_profile,
+                external_busy: false,
+                call_deadline: None,
+                auto_answer_deadline: None,
                 events,
             },
             rx,
@@ -113,7 +135,11 @@ impl Telephone {
     }
 
     pub fn is_busy(&self) -> bool {
-        self.state != CallState::Available
+        self.external_busy || self.state != CallState::Available
+    }
+
+    pub fn set_busy(&mut self, busy: bool) {
+        self.external_busy = busy;
     }
 
     pub fn can_accept_call(&self, identity_hash: &[u8; 16]) -> bool {
@@ -127,6 +153,8 @@ impl Telephone {
             return false;
         }
         self.active_identity = Some(identity_hash);
+        self.call_deadline = Some(Instant::now() + self.config.wait_time);
+        self.auto_answer_deadline = None;
         self.set_state(CallState::Calling);
         true
     }
@@ -139,6 +167,11 @@ impl Telephone {
             return false;
         }
         self.active_identity = Some(identity_hash);
+        self.call_deadline = Some(Instant::now() + self.config.ring_time);
+        self.auto_answer_deadline = self
+            .config
+            .auto_answer_after
+            .map(|delay| Instant::now() + delay);
         self.set_state(CallState::Ringing);
         let _ = self.events.send(CallEvent::IncomingCall { identity_hash });
         true
@@ -148,6 +181,8 @@ impl Telephone {
         if self.state != CallState::Ringing {
             return false;
         }
+        self.call_deadline = Some(Instant::now() + self.config.connect_time);
+        self.auto_answer_deadline = None;
         self.set_state(CallState::Connecting);
         true
     }
@@ -159,6 +194,8 @@ impl Telephone {
         ) {
             return false;
         }
+        self.call_deadline = None;
+        self.auto_answer_deadline = None;
         self.set_state(CallState::Established);
         if let Some(identity_hash) = self.active_identity {
             let _ = self
@@ -170,14 +207,42 @@ impl Telephone {
 
     pub fn hangup(&mut self) {
         let identity_hash = self.active_identity.take();
+        self.call_deadline = None;
+        self.auto_answer_deadline = None;
         self.set_state(CallState::Available);
         let _ = self.events.send(CallEvent::CallEnded { identity_hash });
     }
 
     pub fn reject(&mut self) {
         let identity_hash = self.active_identity.take();
+        self.call_deadline = None;
+        self.auto_answer_deadline = None;
         self.set_state(CallState::Available);
         let _ = self.events.send(CallEvent::Rejected { identity_hash });
+    }
+
+    pub fn tick(&mut self) {
+        let now = Instant::now();
+        if self.state == CallState::Ringing
+            && self
+                .auto_answer_deadline
+                .is_some_and(|deadline| now >= deadline)
+        {
+            let _ = self.answer();
+            return;
+        }
+
+        if self.state != CallState::Established
+            && self.call_deadline.is_some_and(|deadline| now >= deadline)
+        {
+            let identity_hash = self.active_identity;
+            let state = self.state;
+            let _ = self.events.send(CallEvent::TimedOut {
+                identity_hash,
+                state,
+            });
+            self.hangup();
+        }
     }
 
     pub fn apply_signal(&mut self, signal: Signal) {
@@ -190,8 +255,14 @@ impl Telephone {
             }
             Signal::Code(SignalCode::Rejected) => self.reject(),
             Signal::Code(SignalCode::Available) => self.set_state(CallState::Connecting),
-            Signal::Code(SignalCode::Ringing) => self.set_state(CallState::Ringing),
-            Signal::Code(SignalCode::Connecting) => self.set_state(CallState::Connecting),
+            Signal::Code(SignalCode::Ringing) => {
+                self.call_deadline = Some(Instant::now() + self.config.wait_time);
+                self.set_state(CallState::Ringing);
+            }
+            Signal::Code(SignalCode::Connecting) => {
+                self.call_deadline = Some(Instant::now() + self.config.connect_time);
+                self.set_state(CallState::Connecting);
+            }
             Signal::Code(SignalCode::Established) => {
                 let _ = self.establish();
             }
