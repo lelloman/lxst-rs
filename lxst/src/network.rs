@@ -1,14 +1,17 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lxst_core::{EncodedFrame, LxstPacket, PacketError};
+use lxst_core::{CodecKind, EncodedFrame, LxstPacket, PacketError, Signal};
 use rns_core::constants::CONTEXT_NONE;
 use rns_core::types::DestHash;
 use rns_crypto::identity::Identity;
 use rns_net::{AnnouncedIdentity, Destination, RnsNode, SendError};
 
-use crate::pipeline::{AudioSink, EncodedAudioFrame, PipelineError};
+use crate::audio::AudioFrame;
+use crate::codec::{AudioCodec, CodecFactory, CodecSelection, NullCodec};
+use crate::pipeline::{AudioSink, AudioSource, EncodedAudioFrame, PipelineError};
 
 pub const APP_NAME: &str = "lxst";
 pub const TELEPHONY_PRIMITIVE: &str = "telephony";
@@ -137,6 +140,127 @@ where
     }
 }
 
+pub struct LinkSource {
+    codec: Box<dyn AudioCodec>,
+    queue: VecDeque<AudioFrame>,
+    signals: VecDeque<Signal>,
+    max_frames: usize,
+    samplerate: u32,
+    channels: u8,
+    running: bool,
+}
+
+impl LinkSource {
+    pub fn new(codec: Box<dyn AudioCodec>, samplerate: u32, channels: u8) -> Self {
+        Self {
+            codec,
+            queue: VecDeque::new(),
+            signals: VecDeque::new(),
+            max_frames: 128,
+            samplerate,
+            channels,
+            running: false,
+        }
+    }
+
+    pub fn with_null_codec(samplerate: u32, channels: u8) -> Self {
+        Self::new(Box::new(NullCodec), samplerate, channels)
+    }
+
+    pub fn set_codec(&mut self, codec: Box<dyn AudioCodec>) {
+        self.codec = codec;
+    }
+
+    pub fn queued_frames(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn queued_signals(&self) -> usize {
+        self.signals.len()
+    }
+
+    pub fn pop_signal(&mut self) -> Option<Signal> {
+        self.signals.pop_front()
+    }
+
+    pub fn set_max_frames(&mut self, max_frames: usize) {
+        self.max_frames = max_frames.max(1);
+        while self.queue.len() > self.max_frames {
+            self.queue.pop_front();
+        }
+    }
+
+    pub fn handle_packet_bytes(&mut self, data: &[u8]) -> Result<(), NetworkError> {
+        let packet = LxstPacket::decode(data)?;
+        self.handle_packet(packet)
+    }
+
+    pub fn handle_packet(&mut self, packet: LxstPacket) -> Result<(), NetworkError> {
+        for signal in packet.signals {
+            self.signals.push_back(signal);
+        }
+        for frame in packet.frames {
+            if self.codec.kind() != frame.codec {
+                self.codec = default_codec_for_kind(frame.codec);
+            }
+            let decoded = self.codec.decode(&frame.payload, self.samplerate)?;
+            self.samplerate = decoded.samplerate();
+            self.channels = decoded.channels();
+            if self.queue.len() >= self.max_frames {
+                self.queue.pop_front();
+            }
+            self.queue.push_back(decoded);
+        }
+        Ok(())
+    }
+}
+
+impl AudioSource for LinkSource {
+    fn start(&mut self) {
+        self.running = true;
+    }
+
+    fn stop(&mut self) {
+        self.running = false;
+    }
+
+    fn is_running(&self) -> bool {
+        self.running
+    }
+
+    fn samplerate(&self) -> u32 {
+        self.samplerate
+    }
+
+    fn channels(&self) -> u8 {
+        self.channels
+    }
+
+    fn next_frame(&mut self) -> Result<Option<AudioFrame>, PipelineError> {
+        if self.running {
+            Ok(self.queue.pop_front())
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+fn default_codec_for_kind(kind: CodecKind) -> Box<dyn AudioCodec> {
+    match kind {
+        CodecKind::Null => Box::new(NullCodec),
+        CodecKind::Raw => {
+            CodecFactory::create(CodecSelection::Raw(lxst_core::RawBitDepth::Float32))
+        }
+        CodecKind::Opus => CodecFactory::create(CodecSelection::Profile(
+            lxst_core::CodecProfile::OpusVoiceMedium,
+        )),
+        CodecKind::Codec2 => CodecFactory::create(CodecSelection::Profile(
+            lxst_core::CodecProfile::Codec2_3200,
+        )),
+        _ => Box::new(NullCodec),
+    }
+}
+
 pub fn telephony_dest_hash(identity_hash: [u8; 16]) -> DestHash {
     Destination::single_in(
         APP_NAME,
@@ -186,6 +310,8 @@ pub fn create_telephony_link(
 pub enum NetworkError {
     #[error(transparent)]
     Packet(#[from] PacketError),
+    #[error(transparent)]
+    Codec(#[from] crate::codec::CodecError),
     #[error("RNS send failed")]
     Send,
     #[error("identity has no private key")]

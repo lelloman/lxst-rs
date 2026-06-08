@@ -1,7 +1,8 @@
 use lxst::{
-    AudioSink, EncodedAudioFrame, NetworkError, PacketSender, Packetizer, RawBitDepth, RawCodec,
+    AudioSink, AudioSource, EncodedAudioFrame, LinkSource, NetworkError, PacketSender, Packetizer,
+    RawBitDepth, RawCodec,
 };
-use lxst_core::{CodecKind, LxstPacket};
+use lxst_core::{CodecKind, EncodedFrame, LxstPacket, Signal, SignalCode};
 
 #[derive(Debug, Default)]
 struct MockSender {
@@ -63,4 +64,58 @@ fn packetizer_records_transmit_failure() {
     assert!(result.is_err());
     assert!(packetizer.transmit_failure());
     assert!(!packetizer.can_receive());
+}
+
+#[test]
+fn link_source_decodes_packet_frames_and_signals() {
+    let mut raw = RawCodec::default();
+    let payload = lxst::AudioCodec::encode(
+        &mut raw,
+        &lxst::AudioFrame::new(8_000, 1, vec![0.0, 0.25]).unwrap(),
+    )
+    .unwrap();
+    let packet = LxstPacket {
+        signals: vec![Signal::Code(SignalCode::Ringing)],
+        frames: vec![EncodedFrame::new(CodecKind::Raw, payload)],
+    };
+    let encoded = packet.encode().unwrap();
+    let mut source = LinkSource::with_null_codec(8_000, 1);
+
+    source.handle_packet_bytes(&encoded).unwrap();
+    assert_eq!(source.queued_signals(), 1);
+    assert_eq!(source.pop_signal(), Some(Signal::Code(SignalCode::Ringing)));
+    assert_eq!(source.queued_frames(), 1);
+
+    source.start();
+    let frame = source.next_frame().unwrap().unwrap();
+    assert_eq!(frame.samplerate(), 8_000);
+    assert_eq!(frame.channels(), 1);
+    assert_eq!(frame.samples(), &[0.0, 0.25]);
+}
+
+#[test]
+fn link_source_applies_frame_backpressure() {
+    let mut raw = RawCodec::default();
+    let payload = lxst::AudioCodec::encode(
+        &mut raw,
+        &lxst::AudioFrame::new(8_000, 1, vec![0.0]).unwrap(),
+    )
+    .unwrap();
+    let mut source = LinkSource::with_null_codec(8_000, 1);
+    source.set_max_frames(1);
+
+    source
+        .handle_packet(LxstPacket::frame(EncodedFrame::new(
+            CodecKind::Raw,
+            payload.clone(),
+        )))
+        .unwrap();
+    source
+        .handle_packet(LxstPacket::frame(EncodedFrame::new(
+            CodecKind::Raw,
+            payload,
+        )))
+        .unwrap();
+
+    assert_eq!(source.queued_frames(), 1);
 }
