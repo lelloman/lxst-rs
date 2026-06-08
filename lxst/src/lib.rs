@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod codec;
 pub mod network;
+pub mod pipeline;
 pub mod telephony;
 
 pub use lxst_core as core;
@@ -13,6 +14,10 @@ pub use codec::{
     OpusCodec, RawCodec,
 };
 pub use network::{LxstLinkSender, TelephonyEndpoint};
+pub use pipeline::{
+    AudioSink, AudioSource, BufferedSink, BufferedSource, EncodedAudioFrame, Pipeline,
+    PipelineError,
+};
 
 pub use lxst_core::{
     CallProfile, CodecHeader, CodecKind, CodecProfile, EncodedFrame, FrameDuration, LxstPacket,
