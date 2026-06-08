@@ -2,6 +2,7 @@
 
 pub mod audio;
 pub mod codec;
+pub mod hardware;
 pub mod media;
 pub mod network;
 pub mod pipeline;
@@ -18,6 +19,7 @@ pub use codec::{
     AudioCodec, Codec2Codec, CodecError, CodecFactory, CodecSelection, CodecState, NullCodec,
     OpusCodec, RawCodec,
 };
+pub use hardware::{Key, KeyTransition, KeypadEvent, Lcd1602Buffer, MatrixKeypad};
 pub use media::{FilePlayer, FileRecorder, MediaError, OpusFileSink, OpusFileSource};
 pub use network::{
     telephony_callback_channel, LinkSource, LxstLinkSender, NetworkError, PacketSender, Packetizer,
