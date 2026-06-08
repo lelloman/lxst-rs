@@ -13,7 +13,7 @@ pub use codec::{
     AudioCodec, Codec2Codec, CodecError, CodecFactory, CodecSelection, CodecState, NullCodec,
     OpusCodec, RawCodec,
 };
-pub use network::{LxstLinkSender, TelephonyEndpoint};
+pub use network::{LxstLinkSender, NetworkError, PacketSender, Packetizer, TelephonyEndpoint};
 pub use pipeline::{
     AudioSink, AudioSource, BufferedSink, BufferedSource, EncodedAudioFrame, Pipeline,
     PipelineError,

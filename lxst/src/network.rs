@@ -2,11 +2,13 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lxst_core::{LxstPacket, PacketError};
+use lxst_core::{EncodedFrame, LxstPacket, PacketError};
 use rns_core::constants::CONTEXT_NONE;
 use rns_core::types::DestHash;
 use rns_crypto::identity::Identity;
 use rns_net::{AnnouncedIdentity, Destination, RnsNode, SendError};
+
+use crate::pipeline::{AudioSink, EncodedAudioFrame, PipelineError};
 
 pub const APP_NAME: &str = "lxst";
 pub const TELEPHONY_PRIMITIVE: &str = "telephony";
@@ -69,6 +71,68 @@ impl LxstLinkSender {
 
     pub fn teardown(&self) -> Result<(), NetworkError> {
         self.node.teardown_link(self.link_id)?;
+        Ok(())
+    }
+}
+
+pub trait PacketSender {
+    fn send_packet(&mut self, packet: &LxstPacket) -> Result<(), NetworkError>;
+}
+
+impl PacketSender for LxstLinkSender {
+    fn send_packet(&mut self, packet: &LxstPacket) -> Result<(), NetworkError> {
+        LxstLinkSender::send_packet(self, packet)
+    }
+}
+
+#[derive(Debug)]
+pub struct Packetizer<S> {
+    sender: S,
+    transmit_failure: bool,
+}
+
+impl<S> Packetizer<S>
+where
+    S: PacketSender,
+{
+    pub fn new(sender: S) -> Self {
+        Self {
+            sender,
+            transmit_failure: false,
+        }
+    }
+
+    pub fn transmit_failure(&self) -> bool {
+        self.transmit_failure
+    }
+
+    pub fn sender(&self) -> &S {
+        &self.sender
+    }
+
+    pub fn sender_mut(&mut self) -> &mut S {
+        &mut self.sender
+    }
+
+    pub fn into_sender(self) -> S {
+        self.sender
+    }
+}
+
+impl<S> AudioSink for Packetizer<S>
+where
+    S: PacketSender + Send,
+{
+    fn can_receive(&self) -> bool {
+        !self.transmit_failure
+    }
+
+    fn handle_frame(&mut self, frame: EncodedAudioFrame) -> Result<(), PipelineError> {
+        let packet = LxstPacket::frame(EncodedFrame::new(frame.codec, frame.payload));
+        if let Err(error) = self.sender.send_packet(&packet) {
+            self.transmit_failure = true;
+            return Err(PipelineError::Network(error));
+        }
         Ok(())
     }
 }

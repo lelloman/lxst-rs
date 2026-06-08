@@ -4,6 +4,7 @@ use lxst_core::CodecKind;
 
 use crate::audio::{AudioError, AudioFrame};
 use crate::codec::{AudioCodec, CodecError};
+use crate::network::NetworkError;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncodedAudioFrame {
@@ -188,4 +189,6 @@ pub enum PipelineError {
     IncompatibleSourceFrame,
     #[error("sink buffer is full")]
     SinkFull,
+    #[error(transparent)]
+    Network(#[from] NetworkError),
 }
