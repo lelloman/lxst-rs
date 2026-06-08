@@ -21,6 +21,15 @@ fn telephony_profiles_match_python_lxst() {
     assert_eq!(values, vec![0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x80, 0x70]);
     assert_eq!(CallProfile::LowLatency.as_u8(), 0x80);
     assert_eq!(CallProfile::UltraLowLatency.as_u8(), 0x70);
+    assert_eq!(CallProfile::MediumQuality.profile_index(), 3);
+    assert_eq!(
+        CallProfile::LowLatency.next_profile(),
+        CallProfile::UltraLowLatency
+    );
+    assert_eq!(
+        CallProfile::UltraLowLatency.next_profile(),
+        CallProfile::UltraLowBandwidth
+    );
     assert_eq!(CallProfile::LowLatency.frame_duration().as_millis(), 20);
     assert_eq!(
         CallProfile::UltraLowLatency.frame_duration().as_millis(),

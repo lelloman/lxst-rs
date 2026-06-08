@@ -36,6 +36,18 @@ impl CallProfile {
         ]
     }
 
+    pub fn profile_index(self) -> usize {
+        Self::available_profiles()
+            .iter()
+            .position(|profile| *profile == self)
+            .expect("call profile is always part of the static profile list")
+    }
+
+    pub fn next_profile(self) -> Self {
+        let profiles = Self::available_profiles();
+        profiles[(self.profile_index() + 1) % profiles.len()]
+    }
+
     pub fn codec_profile(self) -> CodecProfile {
         match self {
             Self::UltraLowBandwidth => CodecProfile::Codec2_700C,

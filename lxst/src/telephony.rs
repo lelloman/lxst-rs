@@ -87,6 +87,7 @@ pub enum CallEvent {
         identity_hash: Option<[u8; 16]>,
         state: CallState,
     },
+    LowLatencyOutputChanged(bool),
     ProfileChanged(CallProfile),
     SignalReceived(Signal),
 }
@@ -98,6 +99,7 @@ pub struct Telephone {
     active_identity: Option<[u8; 16]>,
     active_profile: CallProfile,
     external_busy: bool,
+    low_latency_output: bool,
     call_deadline: Option<Instant>,
     auto_answer_deadline: Option<Instant>,
     events: mpsc::Sender<CallEvent>,
@@ -114,6 +116,7 @@ impl Telephone {
                 active_identity: None,
                 active_profile,
                 external_busy: false,
+                low_latency_output: false,
                 call_deadline: None,
                 auto_answer_deadline: None,
                 events,
@@ -134,6 +137,28 @@ impl Telephone {
         self.active_profile
     }
 
+    pub fn low_latency_output(&self) -> bool {
+        self.low_latency_output
+    }
+
+    pub fn set_low_latency_output(&mut self, enabled: bool) {
+        if self.low_latency_output != enabled {
+            self.low_latency_output = enabled;
+            let _ = self
+                .events
+                .send(CallEvent::LowLatencyOutputChanged(enabled));
+        }
+    }
+
+    pub fn select_call_profile(&mut self, profile: Option<CallProfile>) -> CallProfile {
+        let profile = profile.unwrap_or(self.config.profile);
+        if self.active_profile != profile {
+            self.active_profile = profile;
+            let _ = self.events.send(CallEvent::ProfileChanged(profile));
+        }
+        profile
+    }
+
     pub fn is_busy(&self) -> bool {
         self.external_busy || self.state != CallState::Available
     }
@@ -149,9 +174,18 @@ impl Telephone {
     }
 
     pub fn begin_outgoing_call(&mut self, identity_hash: [u8; 16]) -> bool {
+        self.begin_outgoing_call_with_profile(identity_hash, None)
+    }
+
+    pub fn begin_outgoing_call_with_profile(
+        &mut self,
+        identity_hash: [u8; 16],
+        profile: Option<CallProfile>,
+    ) -> bool {
         if self.is_busy() {
             return false;
         }
+        self.select_call_profile(profile);
         self.active_identity = Some(identity_hash);
         self.call_deadline = Some(Instant::now() + self.config.wait_time);
         self.auto_answer_deadline = None;
@@ -268,8 +302,7 @@ impl Telephone {
             }
             Signal::Code(SignalCode::Calling) => {}
             Signal::PreferredProfile(profile) => {
-                self.active_profile = profile;
-                let _ = self.events.send(CallEvent::ProfileChanged(profile));
+                self.select_call_profile(Some(profile));
             }
             Signal::Unknown(_) => {}
         }

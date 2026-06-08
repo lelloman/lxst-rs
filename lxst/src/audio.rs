@@ -294,6 +294,7 @@ impl AudioFilter for Agc {
 pub struct Mixer {
     queues: HashMap<u64, VecDeque<AudioFrame>>,
     max_frames_per_source: usize,
+    source_max_frames: HashMap<u64, usize>,
     gain_db: f32,
     muted: bool,
 }
@@ -303,6 +304,7 @@ impl Default for Mixer {
         Self {
             queues: HashMap::new(),
             max_frames_per_source: 8,
+            source_max_frames: HashMap::new(),
             gain_db: 0.0,
             muted: false,
         }
@@ -310,6 +312,16 @@ impl Default for Mixer {
 }
 
 impl Mixer {
+    pub fn set_source_max_frames(&mut self, source_id: u64, max_frames: usize) {
+        let max_frames = max_frames.max(1);
+        self.source_max_frames.insert(source_id, max_frames);
+        if let Some(queue) = self.queues.get_mut(&source_id) {
+            while queue.len() > max_frames {
+                queue.pop_front();
+            }
+        }
+    }
+
     pub fn set_gain_db(&mut self, gain_db: f32) {
         self.gain_db = gain_db;
     }
@@ -319,11 +331,12 @@ impl Mixer {
     }
 
     pub fn push(&mut self, source_id: u64, frame: AudioFrame) {
+        let max_frames = self.source_frame_limit(source_id);
         let queue = self
             .queues
             .entry(source_id)
-            .or_insert_with(|| VecDeque::with_capacity(self.max_frames_per_source));
-        if queue.len() >= self.max_frames_per_source {
+            .or_insert_with(|| VecDeque::with_capacity(max_frames));
+        if queue.len() >= max_frames {
             queue.pop_front();
         }
         queue.push_back(frame);
@@ -357,6 +370,13 @@ impl Mixer {
                 frame.apply_gain_db(self.gain_db).clipped()
             }
         }))
+    }
+
+    fn source_frame_limit(&self, source_id: u64) -> usize {
+        self.source_max_frames
+            .get(&source_id)
+            .copied()
+            .unwrap_or(self.max_frames_per_source)
     }
 }
 

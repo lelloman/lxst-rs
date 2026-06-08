@@ -150,6 +150,32 @@ fn mixer_sums_and_clips_frames() {
 }
 
 #[test]
+fn mixer_limits_frames_per_source() {
+    let mut mixer = Mixer::default();
+    mixer.set_source_max_frames(1, 2);
+    mixer.push(1, AudioFrame::new(8_000, 1, vec![0.2]).unwrap());
+    mixer.push(1, AudioFrame::new(8_000, 1, vec![0.4]).unwrap());
+    mixer.push(1, AudioFrame::new(8_000, 1, vec![0.6]).unwrap());
+
+    assert_eq!(mixer.mix_next().unwrap().unwrap().samples(), &[0.4]);
+    assert_eq!(mixer.mix_next().unwrap().unwrap().samples(), &[0.6]);
+    assert!(mixer.mix_next().unwrap().is_none());
+}
+
+#[test]
+fn mixer_tightening_source_limit_drops_oldest_frames() {
+    let mut mixer = Mixer::default();
+    mixer.push(1, AudioFrame::new(8_000, 1, vec![0.2]).unwrap());
+    mixer.push(1, AudioFrame::new(8_000, 1, vec![0.4]).unwrap());
+    mixer.push(1, AudioFrame::new(8_000, 1, vec![0.6]).unwrap());
+
+    mixer.set_source_max_frames(1, 1);
+
+    assert_eq!(mixer.mix_next().unwrap().unwrap().samples(), &[0.6]);
+    assert!(mixer.mix_next().unwrap().is_none());
+}
+
+#[test]
 fn tone_source_generates_expected_shape() {
     let mut tone = ToneSource::new(1_000.0, 8_000, 2, 0.5);
     let frame = tone.next_frame(8).unwrap();
@@ -204,6 +230,33 @@ fn telephone_applies_profile_signalling() {
     let (mut telephone, _rx) = Telephone::new(TelephoneConfig::default());
     telephone.apply_signal(Signal::PreferredProfile(CallProfile::LowLatency));
     assert_eq!(telephone.active_profile(), CallProfile::LowLatency);
+}
+
+#[test]
+fn telephone_selects_outgoing_profile_preference() {
+    let remote = [0x22; 16];
+    let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
+
+    assert!(telephone.begin_outgoing_call_with_profile(remote, Some(CallProfile::HighQuality)));
+
+    assert_eq!(telephone.active_profile(), CallProfile::HighQuality);
+    assert!(rx.try_iter().any(|event| matches!(
+        event,
+        lxst::telephony::CallEvent::ProfileChanged(CallProfile::HighQuality)
+    )));
+}
+
+#[test]
+fn telephone_low_latency_output_setting_emits_change() {
+    let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
+
+    telephone.set_low_latency_output(true);
+
+    assert!(telephone.low_latency_output());
+    assert!(matches!(
+        rx.recv().unwrap(),
+        lxst::telephony::CallEvent::LowLatencyOutputChanged(true)
+    ));
 }
 
 #[test]
