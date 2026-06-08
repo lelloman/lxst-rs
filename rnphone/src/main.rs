@@ -3,15 +3,19 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
-use std::thread;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use lxst::network::{
     create_telephony_link, recall_telephony_identity, request_path_until, telephony_dest_hash,
-    TelephonyEndpoint,
+    LinkSource, LxstLinkSender, Packetizer, TelephonyEndpoint,
 };
-use lxst::{CallState, LxstPacket, Telephone, TelephoneConfig, TelephonyNetworkEvent};
+use lxst::{
+    Agc, AudioCodec, AudioSink, AudioSource, BandPass, CallProfile, CallState, CodecFactory,
+    CodecSelection, CpalInputConfig, CpalInputSource, CpalOutputConfig, CpalOutputSink,
+    EncodedAudioFrame, LxstPacket, SignalCode, Telephone, TelephoneConfig, TelephonyNetworkEvent,
+};
 use rns_crypto::identity::Identity;
 use rns_crypto::OsRng;
 use rns_net::storage::{load_identity, save_identity};
@@ -131,9 +135,10 @@ struct App {
     identity: Identity,
     telephone: Telephone,
     service: bool,
-    node: Option<RnsNode>,
+    node: Option<Arc<RnsNode>>,
     network_events: Option<mpsc::Receiver<TelephonyNetworkEvent>>,
     active_link: Option<[u8; 16]>,
+    active_audio: Option<CallAudio>,
     last_dialed: Option<[u8; 16]>,
 }
 
@@ -178,6 +183,7 @@ impl App {
             node: None,
             network_events: None,
             active_link: None,
+            active_audio: None,
             last_dialed: None,
         })
     }
@@ -233,6 +239,9 @@ impl App {
                 "answer" => {
                     if self.telephone.answer() {
                         let _ = self.telephone.establish();
+                        if let Some(link_id) = self.active_link {
+                            self.start_call_audio(link_id);
+                        }
                         println!("Call answered");
                     } else {
                         println!("No incoming call to answer");
@@ -268,7 +277,7 @@ impl App {
             .register(&node, &self.identity)
             .map_err(|e| e.to_string())?;
         self.network_events = Some(events);
-        self.node = Some(node);
+        self.node = Some(Arc::new(node));
         Ok(())
     }
 
@@ -325,6 +334,7 @@ impl App {
     }
 
     fn hangup_current(&mut self) {
+        self.stop_call_audio();
         if let (Some(node), Some(link_id)) = (self.node.as_ref(), self.active_link.take()) {
             let _ = node.teardown_link(link_id);
         }
@@ -360,6 +370,7 @@ impl App {
                 self.active_link = Some(link_id.0);
                 if is_initiator {
                     let _ = self.telephone.establish();
+                    self.start_call_audio(link_id.0);
                     println!("Link {link_id} established to {dest_hash}");
                 } else {
                     println!("Incoming link {link_id} from {dest_hash}");
@@ -368,6 +379,7 @@ impl App {
             TelephonyNetworkEvent::LinkClosed { link_id, .. } => {
                 if self.active_link == Some(link_id.0) {
                     self.active_link = None;
+                    self.stop_call_audio();
                     if self.telephone.state() != CallState::Available {
                         self.telephone.hangup();
                     }
@@ -389,12 +401,42 @@ impl App {
                 }
             }
             TelephonyNetworkEvent::LinkData { data, .. } => {
+                if let Some(audio) = &self.active_audio {
+                    let _ = audio.handle_link_data(&data);
+                }
                 if let Ok(packet) = LxstPacket::decode(&data) {
                     for signal in packet.signals {
                         self.telephone.apply_signal(signal);
+                        if signal == lxst::Signal::Code(SignalCode::Established) {
+                            if let Some(link_id) = self.active_link {
+                                self.start_call_audio(link_id);
+                            }
+                        }
                     }
                 }
             }
+        }
+    }
+
+    fn start_call_audio(&mut self, link_id: [u8; 16]) {
+        if self.active_audio.is_some() {
+            return;
+        }
+        let Some(node) = self.node.clone() else {
+            return;
+        };
+        match CallAudio::start(node, link_id, self.telephone.active_profile()) {
+            Ok(audio) => {
+                self.active_audio = Some(audio);
+                println!("Audio transport started");
+            }
+            Err(err) => println!("Audio transport unavailable: {err}"),
+        }
+    }
+
+    fn stop_call_audio(&mut self) {
+        if let Some(mut audio) = self.active_audio.take() {
+            audio.stop();
         }
     }
 
@@ -411,6 +453,122 @@ impl App {
             }
         }
     }
+}
+
+struct CallAudio {
+    link_source: Arc<Mutex<LinkSource>>,
+    stop_tx: mpsc::Sender<()>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl CallAudio {
+    fn start(node: Arc<RnsNode>, link_id: [u8; 16], profile: CallProfile) -> Result<Self, String> {
+        let codec_profile = profile.codec_profile();
+        let frame_ms = profile.frame_duration().as_millis();
+
+        let mut input = CpalInputSource::new(CpalInputConfig {
+            target_frame_ms: frame_ms,
+            skip: Duration::from_millis(75),
+            ease_in: Duration::from_millis(225),
+            ..CpalInputConfig::default()
+        })
+        .map_err(|e| e.to_string())?;
+        input.add_filter(BandPass::new(250.0, 8_500.0).map_err(|e| e.to_string())?);
+        input.add_filter(Agc::new(-15.0, 12.0));
+
+        let mut output =
+            CpalOutputSink::new(CpalOutputConfig::default()).map_err(|e| e.to_string())?;
+        output.start().map_err(|e| e.to_string())?;
+
+        let transmit_codec = CodecFactory::create(CodecSelection::Profile(codec_profile));
+        let receive_codec = CodecFactory::create(CodecSelection::Profile(codec_profile));
+        let link_source = Arc::new(Mutex::new(LinkSource::new(receive_codec, 8_000, 1)));
+        link_source.lock().map_err(|e| e.to_string())?.start();
+
+        let sender = LxstLinkSender::new(node, link_id);
+        let packetizer = Packetizer::new(sender);
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let worker_source = Arc::clone(&link_source);
+        let worker = thread::spawn(move || {
+            if let Err(err) = run_call_audio_loop(
+                input,
+                transmit_codec,
+                packetizer,
+                worker_source,
+                output,
+                stop_rx,
+            ) {
+                eprintln!("rnphone audio: {err}");
+            }
+        });
+
+        Ok(Self {
+            link_source,
+            stop_tx,
+            worker: Some(worker),
+        })
+    }
+
+    fn handle_link_data(&self, data: &[u8]) -> Result<(), String> {
+        self.link_source
+            .lock()
+            .map_err(|e| e.to_string())?
+            .handle_packet_bytes(data)
+            .map_err(|e| e.to_string())
+    }
+
+    fn stop(&mut self) {
+        let _ = self.stop_tx.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for CallAudio {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn run_call_audio_loop(
+    mut input: CpalInputSource,
+    mut transmit_codec: Box<dyn AudioCodec>,
+    mut packetizer: Packetizer<LxstLinkSender>,
+    link_source: Arc<Mutex<LinkSource>>,
+    mut output: CpalOutputSink,
+    stop_rx: mpsc::Receiver<()>,
+) -> Result<(), String> {
+    input.start();
+    while stop_rx.try_recv().is_err() {
+        if let Some(frame) = input.next_frame().map_err(|e| e.to_string())? {
+            let encoded = EncodedAudioFrame {
+                codec: transmit_codec.kind(),
+                samplerate: frame.samplerate(),
+                channels: frame.channels(),
+                payload: transmit_codec.encode(&frame).map_err(|e| e.to_string())?,
+            };
+            packetizer
+                .handle_frame(encoded)
+                .map_err(|e| e.to_string())?;
+        }
+
+        {
+            let mut source = link_source.lock().map_err(|e| e.to_string())?;
+            while let Some(frame) = source.next_frame().map_err(|e| e.to_string())? {
+                if output.can_receive() {
+                    output.handle_frame(frame).map_err(|e| e.to_string())?;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        thread::sleep(Duration::from_millis(5));
+    }
+    input.stop();
+    let _ = output.stop();
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
