@@ -1,7 +1,10 @@
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use lxst::{AudioFrame, AudioSource, OpusFileSink, OpusFileSource};
+use lxst::{
+    AudioFrame, AudioSource, MediaError, OpusFileSink, OpusFileSource, QueuedOpusFileSink,
+    QueuedOpusFileSinkConfig,
+};
 use lxst_core::CodecProfile;
 
 #[test]
@@ -48,6 +51,62 @@ fn ogg_opus_file_sink_writes_final_silence_padding() {
         sink.handle_frame(&frame).unwrap();
         sink.finalize().unwrap();
     }
+
+    let source = OpusFileSource::open(&path, 20, false).unwrap();
+    assert!(source.len_samples() >= 960 * 10);
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn queued_opus_file_sink_applies_backpressure_before_autodigest() {
+    let path = temp_opus_path("queued-backpressure");
+    let frame = AudioFrame::new(48_000, 2, vec![0.0; 960 * 2]).unwrap();
+    let mut sink = QueuedOpusFileSink::create(
+        &path,
+        QueuedOpusFileSinkConfig {
+            max_queued_frames: 1,
+            autodigest: false,
+            ..QueuedOpusFileSinkConfig::default()
+        },
+    )
+    .unwrap();
+
+    assert!(sink.can_receive());
+    sink.handle_frame(frame.clone()).unwrap();
+    assert_eq!(sink.frames_waiting(), 1);
+    assert!(!sink.can_receive());
+    assert!(matches!(
+        sink.handle_frame(frame),
+        Err(MediaError::SinkFull)
+    ));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn queued_opus_file_sink_drains_and_finalizes_on_stop() {
+    let path = temp_opus_path("queued-drain");
+    let frame = AudioFrame::new(48_000, 2, vec![0.0; 960 * 2]).unwrap();
+    let mut sink = QueuedOpusFileSink::create(
+        &path,
+        QueuedOpusFileSinkConfig {
+            finalize_timeout: Duration::from_secs(2),
+            ..QueuedOpusFileSinkConfig::default()
+        },
+    )
+    .unwrap();
+
+    sink.handle_frame(frame.clone()).unwrap();
+    sink.handle_frame(frame).unwrap();
+    sink.stop().unwrap();
+
+    assert!(sink.is_finalized());
+    assert!(!sink.can_receive());
+    assert!(matches!(
+        sink.handle_frame(AudioFrame::silence(48_000, 2, 960).unwrap()),
+        Err(MediaError::SinkClosed)
+    ));
 
     let source = OpusFileSource::open(&path, 20, false).unwrap();
     assert!(source.len_samples() >= 960 * 10);

@@ -20,7 +20,10 @@ pub use codec::{
     OpusCodec, RawCodec,
 };
 pub use hardware::{Key, KeyTransition, KeypadEvent, Lcd1602Buffer, MatrixKeypad};
-pub use media::{FilePlayer, FileRecorder, MediaError, OpusFileSink, OpusFileSource};
+pub use media::{
+    FilePlayer, FileRecorder, MediaError, OpusFileSink, OpusFileSource, QueuedOpusFileSink,
+    QueuedOpusFileSinkConfig,
+};
 pub use network::{
     telephony_callback_channel, LinkSource, LxstLinkSender, NetworkError, PacketSender, Packetizer,
     TelephonyCallbacks, TelephonyEndpoint, TelephonyNetworkEvent,

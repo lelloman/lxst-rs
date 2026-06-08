@@ -1,6 +1,12 @@
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Condvar, Mutex,
+};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use lxst_core::CodecProfile;
@@ -17,6 +23,9 @@ const OPUS_SERIAL: u32 = 0x4c58_5354;
 const OPUS_PRESKIP: u16 = 312;
 const OPUS_GRANULE_RATE: u32 = 48_000;
 const OPUS_FINAL_SILENCE_FRAMES: usize = 10;
+const OPUS_FILE_MAX_FRAMES: usize = 64;
+const OPUS_FILE_AUTOSTART_MIN: usize = 1;
+const OPUS_FILE_FINALIZE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct OpusFileSink {
     path: PathBuf,
@@ -110,6 +119,193 @@ impl OpusFileSink {
 impl Drop for OpusFileSink {
     fn drop(&mut self) {
         let _ = self.finalize();
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedOpusFileSinkConfig {
+    pub profile: CodecProfile,
+    pub max_queued_frames: usize,
+    pub autostart_min: usize,
+    pub autodigest: bool,
+    pub finalize_timeout: Duration,
+}
+
+impl Default for QueuedOpusFileSinkConfig {
+    fn default() -> Self {
+        Self {
+            profile: CodecProfile::OpusAudioMax,
+            max_queued_frames: OPUS_FILE_MAX_FRAMES,
+            autostart_min: OPUS_FILE_AUTOSTART_MIN,
+            autodigest: true,
+            finalize_timeout: OPUS_FILE_FINALIZE_TIMEOUT,
+        }
+    }
+}
+
+pub struct QueuedOpusFileSink {
+    path: PathBuf,
+    config: QueuedOpusFileSinkConfig,
+    queue: Arc<(Mutex<VecDeque<AudioFrame>>, Condvar)>,
+    should_run: Arc<AtomicBool>,
+    recording_stopped: Arc<AtomicBool>,
+    finalized: Arc<AtomicBool>,
+    worker: Option<JoinHandle<Result<(), MediaError>>>,
+}
+
+impl QueuedOpusFileSink {
+    pub fn create(
+        path: impl AsRef<Path>,
+        config: QueuedOpusFileSinkConfig,
+    ) -> Result<Self, MediaError> {
+        OpusCodec::profile_info(config.profile)?;
+        Ok(Self {
+            path: path.as_ref().to_path_buf(),
+            config: QueuedOpusFileSinkConfig {
+                max_queued_frames: config.max_queued_frames.max(1),
+                autostart_min: config.autostart_min.max(1),
+                ..config
+            },
+            queue: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
+            should_run: Arc::new(AtomicBool::new(false)),
+            recording_stopped: Arc::new(AtomicBool::new(false)),
+            finalized: Arc::new(AtomicBool::new(false)),
+            worker: None,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn can_receive(&self) -> bool {
+        if self.recording_stopped.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.queued_frames() < self.config.max_queued_frames
+    }
+
+    pub fn queued_frames(&self) -> usize {
+        self.queue
+            .0
+            .lock()
+            .map(|queue| queue.len())
+            .unwrap_or_default()
+    }
+
+    pub fn frames_waiting(&self) -> usize {
+        self.queued_frames()
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.should_run.load(Ordering::SeqCst)
+    }
+
+    pub fn is_finalized(&self) -> bool {
+        self.finalized.load(Ordering::SeqCst)
+    }
+
+    pub fn handle_frame(&mut self, frame: AudioFrame) -> Result<(), MediaError> {
+        if self.recording_stopped.load(Ordering::SeqCst) {
+            return Err(MediaError::SinkClosed);
+        }
+
+        let should_start = {
+            let (lock, cvar) = &*self.queue;
+            let mut queue = lock
+                .lock()
+                .map_err(|err| MediaError::Synchronization(err.to_string()))?;
+            if queue.len() >= self.config.max_queued_frames {
+                return Err(MediaError::SinkFull);
+            }
+            queue.push_back(frame);
+            cvar.notify_one();
+            self.config.autodigest && !self.is_running() && queue.len() >= self.config.autostart_min
+        };
+
+        if should_start {
+            self.start();
+        }
+        Ok(())
+    }
+
+    pub fn start(&mut self) {
+        if self.worker.is_some() {
+            self.should_run.store(true, Ordering::SeqCst);
+            self.queue.1.notify_all();
+            return;
+        }
+
+        self.should_run.store(true, Ordering::SeqCst);
+        let path = self.path.clone();
+        let profile = self.config.profile;
+        let queue = Arc::clone(&self.queue);
+        let should_run = Arc::clone(&self.should_run);
+        let finalized = Arc::clone(&self.finalized);
+
+        self.worker = Some(thread::spawn(move || {
+            let mut sink = OpusFileSink::create(path, profile)?;
+            loop {
+                let frame = {
+                    let (lock, cvar) = &*queue;
+                    let mut queue = lock
+                        .lock()
+                        .map_err(|err| MediaError::Synchronization(err.to_string()))?;
+                    loop {
+                        if let Some(frame) = queue.pop_front() {
+                            cvar.notify_all();
+                            break Some(frame);
+                        }
+                        if !should_run.load(Ordering::SeqCst) {
+                            break None;
+                        }
+                        queue = cvar
+                            .wait(queue)
+                            .map_err(|err| MediaError::Synchronization(err.to_string()))?;
+                    }
+                };
+
+                let Some(frame) = frame else {
+                    break;
+                };
+                sink.handle_frame(&frame)?;
+            }
+            sink.finalize()?;
+            finalized.store(true, Ordering::SeqCst);
+            Ok(())
+        }));
+    }
+
+    pub fn stop(&mut self) -> Result<(), MediaError> {
+        self.recording_stopped.store(true, Ordering::SeqCst);
+        if self.worker.is_none() {
+            return Ok(());
+        }
+
+        let (lock, cvar) = &*self.queue;
+        let queue = lock
+            .lock()
+            .map_err(|err| MediaError::Synchronization(err.to_string()))?;
+        let _ = cvar
+            .wait_timeout_while(queue, self.config.finalize_timeout, |queue| {
+                !queue.is_empty()
+            })
+            .map_err(|err| MediaError::Synchronization(err.to_string()))?;
+
+        self.should_run.store(false, Ordering::SeqCst);
+        cvar.notify_all();
+
+        let worker = self.worker.take().unwrap();
+        match worker.join() {
+            Ok(result) => result,
+            Err(_) => Err(MediaError::WorkerPanic),
+        }
+    }
+}
+
+impl Drop for QueuedOpusFileSink {
+    fn drop(&mut self) {
+        let _ = self.stop();
     }
 }
 
@@ -307,6 +503,14 @@ pub enum MediaError {
     OggRead(#[from] ogg::OggReadError),
     #[error("invalid Ogg Opus file: {0}")]
     InvalidOpusFile(&'static str),
+    #[error("media sink is closed")]
+    SinkClosed,
+    #[error("media sink buffer is full")]
+    SinkFull,
+    #[error("media worker thread panicked")]
+    WorkerPanic,
+    #[error("media synchronization error: {0}")]
+    Synchronization(String),
 }
 
 fn opus_head(channels: u8, input_samplerate: u32) -> Vec<u8> {
