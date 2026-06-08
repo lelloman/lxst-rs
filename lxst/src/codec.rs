@@ -1,8 +1,11 @@
 use codec2::{Codec2 as InnerCodec2, Codec2Mode};
+use libloading::Library;
 use lxst_core::{
     CodecKind, CodecProfile, CodecProfileInfo, OpusApplication, RawBitDepth, RawFrameHeader,
 };
 use opus::{Application, Bitrate, Channels, Decoder, Encoder};
+use std::ffi::{c_int, c_void};
+use std::ptr::NonNull;
 
 use crate::audio::{AudioError, AudioFrame};
 
@@ -253,11 +256,13 @@ impl AudioCodec for OpusCodec {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Codec2Codec {
     profile: CodecProfile,
     codec: Option<InnerCodec2>,
     mode: Option<Codec2Mode>,
+    system_codec: Option<SystemCodec2>,
+    system_mode: Option<c_int>,
 }
 
 impl Codec2Codec {
@@ -266,6 +271,8 @@ impl Codec2Codec {
             profile,
             codec: None,
             mode: None,
+            system_codec: None,
+            system_mode: None,
         }
     }
 
@@ -280,6 +287,65 @@ impl Codec2Codec {
         }
         self.codec.as_mut().unwrap()
     }
+
+    fn system_codec(&mut self, mode: c_int) -> Result<&mut SystemCodec2, CodecError> {
+        if self.system_mode != Some(mode) {
+            self.system_codec = Some(SystemCodec2::new(mode)?);
+            self.system_mode = Some(mode);
+        }
+        Ok(self.system_codec.as_mut().unwrap())
+    }
+
+    fn encode_system(
+        &mut self,
+        frame: &AudioFrame,
+        mode_header: u8,
+        mode: c_int,
+    ) -> Result<Vec<u8>, CodecError> {
+        let normalized = normalize_channels(frame.samples(), frame.channels(), 1)?;
+        let resampled = resample_linear(&normalized, 1, frame.samplerate(), 8_000)?;
+        let input: Vec<i16> = resampled
+            .into_iter()
+            .map(|sample| (sample.clamp(-1.0, 1.0) * 32767.0) as i16)
+            .collect();
+        let codec = self.system_codec(mode)?;
+        let samples_per_frame = codec.samples_per_frame();
+        let bytes_per_frame = codec.bits_per_frame().div_ceil(8);
+        let frame_count = input.len() / samples_per_frame;
+        let mut encoded = Vec::with_capacity(1 + frame_count * bytes_per_frame);
+        encoded.push(mode_header);
+        for frame in input.chunks_exact(samples_per_frame) {
+            let mut output = vec![0u8; bytes_per_frame];
+            codec.encode(&mut output, frame);
+            encoded.extend_from_slice(&output);
+        }
+        Ok(encoded)
+    }
+
+    fn decode_system(
+        &mut self,
+        payload: &[u8],
+        samplerate: u32,
+        mode: c_int,
+    ) -> Result<AudioFrame, CodecError> {
+        let codec = self.system_codec(mode)?;
+        let samples_per_frame = codec.samples_per_frame();
+        let bytes_per_frame = codec.bits_per_frame().div_ceil(8);
+        let frame_count = payload.len() / bytes_per_frame;
+        let mut decoded = Vec::with_capacity(frame_count * samples_per_frame);
+        for encoded_frame in payload.chunks_exact(bytes_per_frame) {
+            let mut output = vec![0i16; samples_per_frame];
+            codec.decode(&mut output, encoded_frame);
+            decoded.extend(output);
+        }
+        let samples: Vec<f32> = decoded
+            .into_iter()
+            .map(|sample| sample as f32 / 32767.0)
+            .collect();
+        let samplerate = if samplerate == 0 { 8_000 } else { samplerate };
+        let samples = resample_linear(&samples, 1, 8_000, samplerate)?;
+        Ok(AudioFrame::new(samplerate, 1, samples)?)
+    }
 }
 
 impl AudioCodec for Codec2Codec {
@@ -288,6 +354,9 @@ impl AudioCodec for Codec2Codec {
     }
 
     fn encode(&mut self, frame: &AudioFrame) -> Result<Vec<u8>, CodecError> {
+        if self.profile == CodecProfile::Codec2_700C {
+            return self.encode_system(frame, 0x00, CODEC2_MODE_700C);
+        }
         let mode = codec2_mode(self.profile)?;
         let mode_header = codec2_mode_header(self.profile)?;
         let normalized = normalize_channels(frame.samples(), frame.channels(), 1)?;
@@ -312,6 +381,9 @@ impl AudioCodec for Codec2Codec {
 
     fn decode(&mut self, data: &[u8], samplerate: u32) -> Result<AudioFrame, CodecError> {
         let (&mode_header, payload) = data.split_first().ok_or(CodecError::EmptyFrame)?;
+        if mode_header == 0x00 {
+            return self.decode_system(payload, samplerate, CODEC2_MODE_700C);
+        }
         let mode = codec2_mode_from_header(mode_header)?;
         let codec = self.codec(mode);
         let samples_per_frame = codec.samples_per_frame();
@@ -331,6 +403,110 @@ impl AudioCodec for Codec2Codec {
         let samples = resample_linear(&samples, 1, 8_000, samplerate)?;
         Ok(AudioFrame::new(samplerate, 1, samples)?)
     }
+}
+
+type Codec2Create = unsafe extern "C" fn(c_int) -> *mut c_void;
+type Codec2Destroy = unsafe extern "C" fn(*mut c_void);
+type Codec2Encode = unsafe extern "C" fn(*mut c_void, *mut u8, *const i16);
+type Codec2Decode = unsafe extern "C" fn(*mut c_void, *mut i16, *const u8);
+type Codec2SamplesPerFrame = unsafe extern "C" fn(*mut c_void) -> c_int;
+type Codec2BitsPerFrame = unsafe extern "C" fn(*mut c_void) -> c_int;
+
+const CODEC2_MODE_700C: c_int = 8;
+
+#[derive(Debug)]
+struct SystemCodec2 {
+    _library: Library,
+    state: NonNull<c_void>,
+    destroy: Codec2Destroy,
+    encode: Codec2Encode,
+    decode: Codec2Decode,
+    samples_per_frame: Codec2SamplesPerFrame,
+    bits_per_frame: Codec2BitsPerFrame,
+}
+
+impl SystemCodec2 {
+    fn new(mode: c_int) -> Result<Self, CodecError> {
+        let library = load_codec2_library()?;
+        unsafe {
+            let create = *library
+                .get::<Codec2Create>(b"codec2_create\0")
+                .map_err(system_codec2_error)?;
+            let destroy = *library
+                .get::<Codec2Destroy>(b"codec2_destroy\0")
+                .map_err(system_codec2_error)?;
+            let encode = *library
+                .get::<Codec2Encode>(b"codec2_encode\0")
+                .map_err(system_codec2_error)?;
+            let decode = *library
+                .get::<Codec2Decode>(b"codec2_decode\0")
+                .map_err(system_codec2_error)?;
+            let samples_per_frame = *library
+                .get::<Codec2SamplesPerFrame>(b"codec2_samples_per_frame\0")
+                .map_err(system_codec2_error)?;
+            let bits_per_frame = *library
+                .get::<Codec2BitsPerFrame>(b"codec2_bits_per_frame\0")
+                .map_err(system_codec2_error)?;
+            let state = NonNull::new(create(mode)).ok_or_else(|| {
+                CodecError::Unsupported(format!("system libcodec2 rejected mode {mode}"))
+            })?;
+            Ok(Self {
+                _library: library,
+                state,
+                destroy,
+                encode,
+                decode,
+                samples_per_frame,
+                bits_per_frame,
+            })
+        }
+    }
+
+    fn samples_per_frame(&self) -> usize {
+        unsafe { (self.samples_per_frame)(self.state.as_ptr()) as usize }
+    }
+
+    fn bits_per_frame(&self) -> usize {
+        unsafe { (self.bits_per_frame)(self.state.as_ptr()) as usize }
+    }
+
+    fn encode(&mut self, output: &mut [u8], input: &[i16]) {
+        unsafe {
+            (self.encode)(self.state.as_ptr(), output.as_mut_ptr(), input.as_ptr());
+        }
+    }
+
+    fn decode(&mut self, output: &mut [i16], input: &[u8]) {
+        unsafe {
+            (self.decode)(self.state.as_ptr(), output.as_mut_ptr(), input.as_ptr());
+        }
+    }
+}
+
+impl Drop for SystemCodec2 {
+    fn drop(&mut self) {
+        unsafe {
+            (self.destroy)(self.state.as_ptr());
+        }
+    }
+}
+
+unsafe impl Send for SystemCodec2 {}
+
+fn load_codec2_library() -> Result<Library, CodecError> {
+    for name in ["libcodec2.so.1.2", "libcodec2.so"] {
+        match unsafe { Library::new(name) } {
+            Ok(library) => return Ok(library),
+            Err(_) => continue,
+        }
+    }
+    Err(CodecError::Unsupported(
+        "Codec2 700C requires a runtime-loadable system libcodec2".to_string(),
+    ))
+}
+
+fn system_codec2_error(error: libloading::Error) -> CodecError {
+    CodecError::Unsupported(format!("system libcodec2 error: {error}"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

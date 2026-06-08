@@ -171,14 +171,21 @@ fn codec2_decode_uses_embedded_mode_header() {
 }
 
 #[test]
-fn codec2_700c_reports_backend_gap() {
-    let frame = AudioFrame::new(8_000, 1, vec![0.0; 320]).unwrap();
+fn codec2_700c_round_trips_with_python_header() {
+    let samples: Vec<f32> = (0..320)
+        .map(|n| ((n as f32 / 8_000.0) * 180.0 * std::f32::consts::TAU).sin() * 0.2)
+        .collect();
+    let frame = AudioFrame::new(8_000, 1, samples).unwrap();
     let mut codec = Codec2Codec::new(CodecProfile::Codec2_700C);
 
-    assert!(matches!(
-        codec.encode(&frame),
-        Err(CodecError::Unsupported(message)) if message.contains("700C")
-    ));
+    let encoded = codec.encode(&frame).unwrap();
+    assert_eq!(encoded[0], 0x00);
+    assert_eq!(encoded.len(), 5);
+
+    let decoded = codec.decode(&encoded, 8_000).unwrap();
+    assert_eq!(decoded.samplerate(), 8_000);
+    assert_eq!(decoded.channels(), 1);
+    assert_eq!(decoded.frame_count(), 320);
 }
 
 #[test]

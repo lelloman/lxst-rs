@@ -10,6 +10,7 @@ authors.workspace = true
 codec2.workspace = true
 cpal.workspace = true
 lxst-core.workspace = true
+libloading.workspace = true
 ogg.workspace = true
 opus.workspace = true
 rns-core.workspace = true
