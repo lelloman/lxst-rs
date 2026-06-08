@@ -1,3 +1,4 @@
+use codec2::{Codec2 as InnerCodec2, Codec2Mode};
 use lxst_core::{
     CodecKind, CodecProfile, CodecProfileInfo, OpusApplication, RawBitDepth, RawFrameHeader,
 };
@@ -232,15 +233,29 @@ impl AudioCodec for OpusCodec {
 #[derive(Debug, Clone)]
 pub struct Codec2Codec {
     profile: CodecProfile,
+    codec: Option<InnerCodec2>,
+    mode: Option<Codec2Mode>,
 }
 
 impl Codec2Codec {
     pub fn new(profile: CodecProfile) -> Self {
-        Self { profile }
+        Self {
+            profile,
+            codec: None,
+            mode: None,
+        }
     }
 
     pub fn profile(&self) -> CodecProfile {
         self.profile
+    }
+
+    fn codec(&mut self, mode: Codec2Mode) -> &mut InnerCodec2 {
+        if !matches!(self.mode, Some(current) if codec2_modes_equal(current, mode)) {
+            self.codec = Some(InnerCodec2::new(mode));
+            self.mode = Some(mode);
+        }
+        self.codec.as_mut().unwrap()
     }
 }
 
@@ -249,16 +264,49 @@ impl AudioCodec for Codec2Codec {
         CodecKind::Codec2
     }
 
-    fn encode(&mut self, _frame: &AudioFrame) -> Result<Vec<u8>, CodecError> {
-        Err(CodecError::Unsupported(
-            "Codec2 FFI binding requires a later codec2 feature milestone".to_string(),
-        ))
+    fn encode(&mut self, frame: &AudioFrame) -> Result<Vec<u8>, CodecError> {
+        let mode = codec2_mode(self.profile)?;
+        let mode_header = codec2_mode_header(self.profile)?;
+        let normalized = normalize_channels(frame.samples(), frame.channels(), 1)?;
+        let resampled = resample_linear(&normalized, 1, frame.samplerate(), 8_000)?;
+        let input: Vec<i16> = resampled
+            .into_iter()
+            .map(|sample| (sample.clamp(-1.0, 1.0) * 32767.0) as i16)
+            .collect();
+        let codec = self.codec(mode);
+        let samples_per_frame = codec.samples_per_frame();
+        let bytes_per_frame = codec.bits_per_frame().div_ceil(8);
+        let frame_count = input.len() / samples_per_frame;
+        let mut encoded = Vec::with_capacity(1 + frame_count * bytes_per_frame);
+        encoded.push(mode_header);
+        for frame in input.chunks_exact(samples_per_frame) {
+            let mut output = vec![0u8; bytes_per_frame];
+            codec.encode(&mut output, frame);
+            encoded.extend_from_slice(&output);
+        }
+        Ok(encoded)
     }
 
-    fn decode(&mut self, _data: &[u8], _samplerate: u32) -> Result<AudioFrame, CodecError> {
-        Err(CodecError::Unsupported(
-            "Codec2 FFI binding requires a later codec2 feature milestone".to_string(),
-        ))
+    fn decode(&mut self, data: &[u8], samplerate: u32) -> Result<AudioFrame, CodecError> {
+        let (&mode_header, payload) = data.split_first().ok_or(CodecError::EmptyFrame)?;
+        let mode = codec2_mode_from_header(mode_header)?;
+        let codec = self.codec(mode);
+        let samples_per_frame = codec.samples_per_frame();
+        let bytes_per_frame = codec.bits_per_frame().div_ceil(8);
+        let frame_count = payload.len() / bytes_per_frame;
+        let mut decoded = Vec::with_capacity(frame_count * samples_per_frame);
+        for encoded_frame in payload.chunks_exact(bytes_per_frame) {
+            let mut output = vec![0i16; samples_per_frame];
+            codec.decode(&mut output, encoded_frame);
+            decoded.extend(output);
+        }
+        let samples: Vec<f32> = decoded
+            .into_iter()
+            .map(|sample| sample as f32 / 32767.0)
+            .collect();
+        let samplerate = if samplerate == 0 { 8_000 } else { samplerate };
+        let samples = resample_linear(&samples, 1, 8_000, samplerate)?;
+        Ok(AudioFrame::new(samplerate, 1, samples)?)
     }
 }
 
@@ -315,6 +363,8 @@ pub enum CodecError {
         sample_count: usize,
         samplerate: u32,
     },
+    #[error("invalid Codec2 mode header 0x{0:02x}")]
+    InvalidCodec2ModeHeader(u8),
     #[error("opus codec error: {0}")]
     Opus(String),
     #[error("unsupported codec operation: {0}")]
@@ -378,9 +428,13 @@ fn resample_linear(
     input_rate: u32,
     output_rate: u32,
 ) -> Result<Vec<f32>, CodecError> {
-    validate_opus_samplerate(output_rate)?;
     if input_rate == 0 {
-        return Err(CodecError::InvalidOpusSamplerate(input_rate));
+        return Err(CodecError::Audio(AudioError::InvalidSamplerate(input_rate)));
+    }
+    if output_rate == 0 {
+        return Err(CodecError::Audio(AudioError::InvalidSamplerate(
+            output_rate,
+        )));
     }
     if input_rate == output_rate {
         return Ok(samples.to_vec());
@@ -417,4 +471,47 @@ fn valid_opus_frame_duration_tenths(sample_count: usize, samplerate: u32) -> Opt
 
 fn max_bytes_per_frame(bitrate_ceiling: u32, frame_duration_tenths_ms: u32) -> usize {
     ((bitrate_ceiling as u64 * frame_duration_tenths_ms as u64).div_ceil(80_000)) as usize
+}
+
+fn codec2_mode(profile: CodecProfile) -> Result<Codec2Mode, CodecError> {
+    match profile {
+        CodecProfile::Codec2_1600 => Ok(Codec2Mode::MODE_1600),
+        CodecProfile::Codec2_3200 => Ok(Codec2Mode::MODE_3200),
+        CodecProfile::Codec2_700C => Err(CodecError::Unsupported(
+            "Codec2 700C is not implemented by the pure Rust codec2 backend".to_string(),
+        )),
+        other => Err(CodecError::InvalidProfile(format!(
+            "{other:?} is not a Codec2 profile"
+        ))),
+    }
+}
+
+fn codec2_mode_header(profile: CodecProfile) -> Result<u8, CodecError> {
+    match profile {
+        CodecProfile::Codec2_700C => Ok(0x00),
+        CodecProfile::Codec2_1600 => Ok(0x04),
+        CodecProfile::Codec2_3200 => Ok(0x06),
+        other => Err(CodecError::InvalidProfile(format!(
+            "{other:?} is not a Codec2 profile"
+        ))),
+    }
+}
+
+fn codec2_mode_from_header(header: u8) -> Result<Codec2Mode, CodecError> {
+    match header {
+        0x04 => Ok(Codec2Mode::MODE_1600),
+        0x06 => Ok(Codec2Mode::MODE_3200),
+        0x00 => Err(CodecError::Unsupported(
+            "Codec2 700C is not implemented by the pure Rust codec2 backend".to_string(),
+        )),
+        other => Err(CodecError::InvalidCodec2ModeHeader(other)),
+    }
+}
+
+fn codec2_modes_equal(left: Codec2Mode, right: Codec2Mode) -> bool {
+    matches!(
+        (left, right),
+        (Codec2Mode::MODE_1600, Codec2Mode::MODE_1600)
+            | (Codec2Mode::MODE_3200, Codec2Mode::MODE_3200)
+    )
 }

@@ -103,6 +103,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "codec2"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2cefd04ca4a2f096acf5f44da5e5931436d030a620901f1fe8fa773e6b9de65b"
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -297,6 +303,7 @@ checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 name = "lxst"
 version = "0.1.0"
 dependencies = [
+ "codec2",
  "lxst-core",
  "opus",
  "rns-core",

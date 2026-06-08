@@ -1,7 +1,8 @@
 use lxst::audio::AudioFilter;
 use lxst::{
-    Agc, AudioCodec, AudioFrame, CallProfile, CallState, CallerPolicy, CodecError, Mixer,
-    OpusCodec, RawBitDepth, RawCodec, Signal, SignalCode, Telephone, TelephoneConfig, ToneSource,
+    Agc, AudioCodec, AudioFrame, CallProfile, CallState, CallerPolicy, Codec2Codec, CodecError,
+    Mixer, OpusCodec, RawBitDepth, RawCodec, Signal, SignalCode, Telephone, TelephoneConfig,
+    ToneSource,
 };
 use lxst_core::CodecProfile;
 
@@ -75,6 +76,65 @@ fn opus_codec_rejects_invalid_frame_duration() {
             sample_count: 123,
             samplerate: 8_000,
         })
+    ));
+}
+
+#[test]
+fn codec2_3200_round_trips_one_frame_with_python_header() {
+    let samples: Vec<f32> = (0..160)
+        .map(|n| ((n as f32 / 8_000.0) * 180.0 * std::f32::consts::TAU).sin() * 0.2)
+        .collect();
+    let frame = AudioFrame::new(8_000, 1, samples).unwrap();
+    let mut codec = Codec2Codec::new(CodecProfile::Codec2_3200);
+
+    let encoded = codec.encode(&frame).unwrap();
+    assert_eq!(encoded[0], 0x06);
+    assert_eq!(encoded.len(), 9);
+
+    let decoded = codec.decode(&encoded, 8_000).unwrap();
+    assert_eq!(decoded.samplerate(), 8_000);
+    assert_eq!(decoded.channels(), 1);
+    assert_eq!(decoded.frame_count(), 160);
+}
+
+#[test]
+fn codec2_1600_round_trips_one_frame_with_python_header() {
+    let samples: Vec<f32> = (0..320)
+        .map(|n| ((n as f32 / 8_000.0) * 180.0 * std::f32::consts::TAU).sin() * 0.2)
+        .collect();
+    let frame = AudioFrame::new(8_000, 1, samples).unwrap();
+    let mut codec = Codec2Codec::new(CodecProfile::Codec2_1600);
+
+    let encoded = codec.encode(&frame).unwrap();
+    assert_eq!(encoded[0], 0x04);
+    assert_eq!(encoded.len(), 9);
+
+    let decoded = codec.decode(&encoded, 8_000).unwrap();
+    assert_eq!(decoded.samplerate(), 8_000);
+    assert_eq!(decoded.channels(), 1);
+    assert_eq!(decoded.frame_count(), 320);
+}
+
+#[test]
+fn codec2_decode_uses_embedded_mode_header() {
+    let samples = vec![0.0; 160];
+    let frame = AudioFrame::new(8_000, 1, samples).unwrap();
+    let mut encoder = Codec2Codec::new(CodecProfile::Codec2_3200);
+    let encoded = encoder.encode(&frame).unwrap();
+    let mut decoder = Codec2Codec::new(CodecProfile::Codec2_1600);
+
+    let decoded = decoder.decode(&encoded, 8_000).unwrap();
+    assert_eq!(decoded.frame_count(), 160);
+}
+
+#[test]
+fn codec2_700c_reports_backend_gap() {
+    let frame = AudioFrame::new(8_000, 1, vec![0.0; 320]).unwrap();
+    let mut codec = Codec2Codec::new(CodecProfile::Codec2_700C);
+
+    assert!(matches!(
+        codec.encode(&frame),
+        Err(CodecError::Unsupported(message)) if message.contains("700C")
     ));
 }
 

@@ -12,6 +12,7 @@ authors = ["lxst-rs contributors"]
 [workspace.dependencies]
 lxst-core = { version = "0.1.0", path = "lxst-core" }
 lxst = { version = "0.1.0", path = "lxst" }
+codec2 = "0.3.0"
 rns-core = { version = "=0.1.13", features = ["std"] }
 rns-crypto = "=0.1.8"
 rns-net = "=0.5.10"
