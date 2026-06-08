@@ -68,6 +68,15 @@ fn packetizer_records_transmit_failure() {
 }
 
 #[test]
+fn signalling_packet_round_trips_call_state() {
+    let packet = LxstPacket::signalling(Signal::Code(SignalCode::Established));
+    let decoded = LxstPacket::decode(&packet.encode().unwrap()).unwrap();
+
+    assert_eq!(decoded.signals, vec![Signal::Code(SignalCode::Established)]);
+    assert!(decoded.frames.is_empty());
+}
+
+#[test]
 fn link_source_decodes_packet_frames_and_signals() {
     let mut raw = RawCodec::default();
     let payload = lxst::AudioCodec::encode(

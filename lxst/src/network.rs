@@ -183,6 +183,10 @@ impl LxstLinkSender {
         Ok(())
     }
 
+    pub fn send_signal(&self, signal: Signal) -> Result<(), NetworkError> {
+        self.send_packet(&LxstPacket::signalling(signal))
+    }
+
     pub fn teardown(&self) -> Result<(), NetworkError> {
         self.node.teardown_link(self.link_id)?;
         Ok(())

@@ -14,7 +14,8 @@ use lxst::network::{
 use lxst::{
     Agc, AudioCodec, AudioSink, AudioSource, BandPass, CallProfile, CallState, CodecFactory,
     CodecSelection, CpalInputConfig, CpalInputSource, CpalOutputConfig, CpalOutputSink,
-    EncodedAudioFrame, LxstPacket, SignalCode, Telephone, TelephoneConfig, TelephonyNetworkEvent,
+    EncodedAudioFrame, LxstPacket, Signal, SignalCode, Telephone, TelephoneConfig,
+    TelephonyNetworkEvent,
 };
 use rns_crypto::identity::Identity;
 use rns_crypto::OsRng;
@@ -238,7 +239,9 @@ impl App {
                 },
                 "answer" => {
                     if self.telephone.answer() {
+                        self.send_signal(Signal::Code(SignalCode::Connecting));
                         let _ = self.telephone.establish();
+                        self.send_signal(Signal::Code(SignalCode::Established));
                         if let Some(link_id) = self.active_link {
                             self.start_call_audio(link_id);
                         }
@@ -334,6 +337,9 @@ impl App {
     }
 
     fn hangup_current(&mut self) {
+        if self.telephone.state() == CallState::Ringing {
+            self.send_signal(Signal::Code(SignalCode::Rejected));
+        }
         self.stop_call_audio();
         if let (Some(node), Some(link_id)) = (self.node.as_ref(), self.active_link.take()) {
             let _ = node.teardown_link(link_id);
@@ -370,6 +376,7 @@ impl App {
                 self.active_link = Some(link_id.0);
                 if is_initiator {
                     let _ = self.telephone.establish();
+                    self.send_signal(Signal::Code(SignalCode::Established));
                     self.start_call_audio(link_id.0);
                     println!("Link {link_id} established to {dest_hash}");
                 } else {
@@ -394,8 +401,10 @@ impl App {
                 if self.telephone.state() == CallState::Available {
                     if self.telephone.begin_incoming_call(identity_hash.0) {
                         self.active_link = Some(link_id.0);
+                        self.send_signal(Signal::Code(SignalCode::Ringing));
                         println!("Incoming call from {identity_hash}");
                     } else {
+                        self.send_signal(Signal::Code(SignalCode::Busy));
                         println!("Rejected incoming call from {identity_hash}");
                     }
                 }
@@ -409,6 +418,7 @@ impl App {
                         self.telephone.apply_signal(signal);
                         if signal == lxst::Signal::Code(SignalCode::Established) {
                             if let Some(link_id) = self.active_link {
+                                let _ = self.telephone.establish();
                                 self.start_call_audio(link_id);
                             }
                         }
@@ -438,6 +448,14 @@ impl App {
         if let Some(mut audio) = self.active_audio.take() {
             audio.stop();
         }
+    }
+
+    fn send_signal(&self, signal: Signal) {
+        let (Some(node), Some(link_id)) = (self.node.clone(), self.active_link) else {
+            return;
+        };
+        let sender = LxstLinkSender::new(node, link_id);
+        let _ = sender.send_signal(signal);
     }
 
     fn print_phonebook(&self) {
