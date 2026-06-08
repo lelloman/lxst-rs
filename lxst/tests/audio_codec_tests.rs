@@ -1,8 +1,8 @@
 use lxst::audio::AudioFilter;
 use lxst::{
-    Agc, AudioCodec, AudioDeviceKind, AudioFrame, CallProfile, CallState, CallerPolicy,
-    Codec2Codec, CodecError, Mixer, OpusCodec, RawBitDepth, RawCodec, Signal, SignalCode,
-    Telephone, TelephoneConfig, ToneSource,
+    Agc, AudioCodec, AudioDeviceKind, AudioFrame, AudioSource, CallProfile, CallState,
+    CallerPolicy, Codec2Codec, CodecError, Mixer, OpusCodec, RawBitDepth, RawCodec, Signal,
+    SignalCode, Telephone, TelephoneConfig, ToneSource,
 };
 use lxst_core::CodecProfile;
 use std::time::Duration;
@@ -231,6 +231,38 @@ fn tone_source_generates_expected_shape() {
     assert_eq!(frame.channels(), 2);
     assert_eq!(frame.frame_count(), 8);
     assert_eq!(frame.samples().len(), 16);
+}
+
+#[test]
+fn tone_source_obeys_audio_source_lifecycle() {
+    let mut tone = ToneSource::with_frame_ms(1_000.0, 8_000, 1, 0.5, 20);
+
+    assert!(AudioSource::next_frame(&mut tone).unwrap().is_none());
+
+    tone.start();
+    assert!(tone.is_running());
+    let frame = AudioSource::next_frame(&mut tone).unwrap().unwrap();
+    assert_eq!(frame.samplerate(), 8_000);
+    assert_eq!(frame.channels(), 1);
+    assert_eq!(frame.frame_count(), 160);
+}
+
+#[test]
+fn tone_source_eases_out_before_stopping() {
+    let mut tone = ToneSource::with_frame_ms(1_000.0, 8_000, 1, 0.5, 20);
+    tone.start();
+    assert!(AudioSource::next_frame(&mut tone).unwrap().is_some());
+
+    tone.stop();
+    let mut frames_after_stop = 0;
+    while tone.is_running() && frames_after_stop < 8 {
+        assert!(AudioSource::next_frame(&mut tone).unwrap().is_some());
+        frames_after_stop += 1;
+    }
+
+    assert!(frames_after_stop > 0);
+    assert!(!tone.is_running());
+    assert!(AudioSource::next_frame(&mut tone).unwrap().is_none());
 }
 
 #[test]

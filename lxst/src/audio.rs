@@ -487,6 +487,14 @@ pub struct ToneSource {
     channels: u8,
     phase: f32,
     gain: f32,
+    target_gain: f32,
+    gain_step: f32,
+    samples_per_frame: usize,
+    ease: bool,
+    ease_gain: f32,
+    ease_step: f32,
+    easing_out: bool,
+    running: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -761,26 +769,123 @@ impl CpalOutputSink {
 
 impl ToneSource {
     pub fn new(frequency: f32, samplerate: u32, channels: u8, gain: f32) -> Self {
+        Self::with_frame_ms(frequency, samplerate, channels, gain, 80)
+    }
+
+    pub fn with_frame_ms(
+        frequency: f32,
+        samplerate: u32,
+        channels: u8,
+        gain: f32,
+        target_frame_ms: u16,
+    ) -> Self {
+        let ease_time = Duration::from_millis(20);
+        let ease_samples = duration_samples(ease_time, samplerate, 1).max(1);
         Self {
             frequency,
             samplerate,
             channels,
             phase: 0.0,
             gain,
+            target_gain: gain,
+            gain_step: 0.02 / ease_samples as f32,
+            samples_per_frame: ((samplerate as u64 * target_frame_ms.max(1) as u64).div_ceil(1000))
+                as usize,
+            ease: true,
+            ease_gain: 0.0,
+            ease_step: 1.0 / ease_samples as f32,
+            easing_out: false,
+            running: false,
         }
     }
 
+    pub fn set_gain(&mut self, gain: f32) {
+        self.target_gain = gain;
+    }
+
+    pub fn set_ease(&mut self, enabled: bool) {
+        self.ease = enabled;
+    }
+
     pub fn next_frame(&mut self, frames: usize) -> Result<AudioFrame, AudioError> {
+        self.generate_frame(frames, false)
+    }
+
+    fn generate_frame(
+        &mut self,
+        frames: usize,
+        apply_ease: bool,
+    ) -> Result<AudioFrame, AudioError> {
         let mut samples = Vec::with_capacity(frames * self.channels as usize);
         let step = 2.0 * PI * self.frequency / self.samplerate as f32;
         for _ in 0..frames {
-            let value = self.phase.sin() * self.gain;
+            let ease_gain = if apply_ease && self.ease {
+                self.ease_gain
+            } else {
+                1.0
+            };
+            let value = self.phase.sin() * self.gain * ease_gain;
             self.phase = (self.phase + step) % (2.0 * PI);
             for _ in 0..self.channels {
                 samples.push(value);
             }
+
+            if apply_ease {
+                if self.gain < self.target_gain {
+                    self.gain = (self.gain + self.gain_step).min(self.target_gain);
+                } else if self.gain > self.target_gain {
+                    self.gain = (self.gain - self.gain_step).max(self.target_gain);
+                }
+
+                if self.ease {
+                    if self.easing_out {
+                        self.ease_gain = (self.ease_gain - self.ease_step).max(0.0);
+                        if self.ease_gain == 0.0 {
+                            self.easing_out = false;
+                            self.running = false;
+                        }
+                    } else if self.ease_gain < 1.0 {
+                        self.ease_gain = (self.ease_gain + self.ease_step).min(1.0);
+                    }
+                }
+            }
         }
         AudioFrame::new(self.samplerate, self.channels, samples)
+    }
+}
+
+impl crate::pipeline::AudioSource for ToneSource {
+    fn start(&mut self) {
+        self.ease_gain = if self.ease { 0.0 } else { 1.0 };
+        self.easing_out = false;
+        self.running = true;
+    }
+
+    fn stop(&mut self) {
+        if self.ease {
+            self.easing_out = true;
+        } else {
+            self.running = false;
+        }
+    }
+
+    fn is_running(&self) -> bool {
+        self.running
+    }
+
+    fn samplerate(&self) -> u32 {
+        self.samplerate
+    }
+
+    fn channels(&self) -> u8 {
+        self.channels
+    }
+
+    fn next_frame(&mut self) -> Result<Option<AudioFrame>, crate::pipeline::PipelineError> {
+        if !self.running {
+            return Ok(None);
+        }
+        Ok(Some(self.generate_frame(self.samples_per_frame, true)?))
     }
 }
 
