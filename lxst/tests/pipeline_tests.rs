@@ -3,8 +3,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lxst::{
-    AudioSink, AudioSource, BufferedSink, BufferedSource, EncodedAudioFrame, Pipeline,
-    PipelineError, PipelineRunner, RawBitDepth, RawCodec,
+    AudioCodec, AudioSink, AudioSource, BufferedSink, BufferedSource, EncodedAudioFrame, Loopback,
+    Pipeline, PipelineError, PipelineRunner, RawBitDepth, RawCodec,
 };
 use lxst_core::CodecKind;
 
@@ -109,6 +109,49 @@ fn pipeline_runner_can_stop_idle_pipeline() {
     assert!(frames.lock().unwrap().is_empty());
 }
 
+#[test]
+fn loopback_decodes_sink_frames_into_source_queue() {
+    let original = lxst::AudioFrame::new(8_000, 1, vec![0.0, 0.5]).unwrap();
+    let mut encoder = RawCodec::new(RawBitDepth::Float32);
+    let encoded = EncodedAudioFrame {
+        codec: CodecKind::Raw,
+        samplerate: 8_000,
+        channels: 1,
+        payload: encoder.encode(&original).unwrap(),
+    };
+    let loopback =
+        Loopback::new(Box::new(RawCodec::new(RawBitDepth::Float32)), 8_000, 1, 2).unwrap();
+    let mut sink = loopback.clone();
+    let mut source = loopback.clone();
+
+    sink.handle_frame(encoded).unwrap();
+    assert_eq!(loopback.queued_frames(), 1);
+    assert!(source.next_frame().unwrap().is_none());
+
+    source.start();
+    let decoded = source.next_frame().unwrap().unwrap();
+    assert_eq!(decoded.samplerate(), 8_000);
+    assert_eq!(decoded.channels(), 1);
+    assert_eq!(decoded.samples(), original.samples());
+    assert_eq!(loopback.queued_frames(), 0);
+}
+
+#[test]
+fn loopback_drops_oldest_frame_when_full() {
+    let loopback =
+        Loopback::new(Box::new(RawCodec::new(RawBitDepth::Float32)), 8_000, 1, 1).unwrap();
+    let mut sink = loopback.clone();
+    let mut source = loopback.clone();
+
+    sink.handle_frame(raw_encoded_frame(&[0.25])).unwrap();
+    sink.handle_frame(raw_encoded_frame(&[0.75])).unwrap();
+
+    source.start();
+    let decoded = source.next_frame().unwrap().unwrap();
+    assert_eq!(decoded.samples(), &[0.75]);
+    assert!(source.next_frame().unwrap().is_none());
+}
+
 struct CollectingSink {
     frames: Arc<Mutex<Vec<EncodedAudioFrame>>>,
 }
@@ -129,4 +172,15 @@ fn wait_for(mut condition: impl FnMut() -> bool) {
         thread::sleep(Duration::from_millis(5));
     }
     assert!(condition());
+}
+
+fn raw_encoded_frame(samples: &[f32]) -> EncodedAudioFrame {
+    let frame = lxst::AudioFrame::new(8_000, 1, samples.to_vec()).unwrap();
+    let mut codec = RawCodec::new(RawBitDepth::Float32);
+    EncodedAudioFrame {
+        codec: CodecKind::Raw,
+        samplerate: 8_000,
+        channels: 1,
+        payload: codec.encode(&frame).unwrap(),
+    }
 }

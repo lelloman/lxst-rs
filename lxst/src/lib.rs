@@ -29,7 +29,7 @@ pub use network::{
     TelephonyCallbacks, TelephonyEndpoint, TelephonyNetworkEvent,
 };
 pub use pipeline::{
-    AudioSink, AudioSource, BufferedSink, BufferedSource, EncodedAudioFrame, Pipeline,
+    AudioSink, AudioSource, BufferedSink, BufferedSource, EncodedAudioFrame, Loopback, Pipeline,
     PipelineError, PipelineRunner,
 };
 

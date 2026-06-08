@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -41,6 +41,119 @@ pub struct Pipeline {
     source: Box<dyn AudioSource>,
     codec: Box<dyn AudioCodec>,
     sink: Box<dyn AudioSink>,
+}
+
+#[derive(Clone)]
+pub struct Loopback {
+    inner: Arc<Mutex<LoopbackInner>>,
+}
+
+struct LoopbackInner {
+    codec: Box<dyn AudioCodec>,
+    samplerate: u32,
+    channels: u8,
+    frames: VecDeque<AudioFrame>,
+    max_frames: usize,
+    running: bool,
+}
+
+impl Loopback {
+    pub fn new(
+        codec: Box<dyn AudioCodec>,
+        samplerate: u32,
+        channels: u8,
+        max_frames: usize,
+    ) -> Result<Self, AudioError> {
+        AudioFrame::silence(samplerate, channels, 0)?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(LoopbackInner {
+                codec,
+                samplerate,
+                channels,
+                frames: VecDeque::with_capacity(max_frames.max(1)),
+                max_frames: max_frames.max(1),
+                running: false,
+            })),
+        })
+    }
+
+    pub fn queued_frames(&self) -> usize {
+        self.inner
+            .lock()
+            .map(|inner| inner.frames.len())
+            .unwrap_or_default()
+    }
+}
+
+impl AudioSource for Loopback {
+    fn start(&mut self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.running = true;
+        }
+    }
+
+    fn stop(&mut self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.running = false;
+        }
+    }
+
+    fn is_running(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|inner| inner.running)
+            .unwrap_or(false)
+    }
+
+    fn samplerate(&self) -> u32 {
+        self.inner
+            .lock()
+            .map(|inner| inner.samplerate)
+            .unwrap_or_default()
+    }
+
+    fn channels(&self) -> u8 {
+        self.inner
+            .lock()
+            .map(|inner| inner.channels)
+            .unwrap_or_default()
+    }
+
+    fn next_frame(&mut self) -> Result<Option<AudioFrame>, PipelineError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|err| PipelineError::Synchronization(err.to_string()))?;
+        if inner.running {
+            Ok(inner.frames.pop_front())
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl AudioSink for Loopback {
+    fn can_receive(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|inner| inner.frames.len() < inner.max_frames)
+            .unwrap_or(false)
+    }
+
+    fn handle_frame(&mut self, frame: EncodedAudioFrame) -> Result<(), PipelineError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|err| PipelineError::Synchronization(err.to_string()))?;
+        if inner.frames.len() >= inner.max_frames {
+            inner.frames.pop_front();
+        }
+        let decoded = inner.codec.decode(&frame.payload, frame.samplerate)?;
+        inner.samplerate = decoded.samplerate();
+        inner.channels = decoded.channels();
+        inner.frames.push_back(decoded);
+        Ok(())
+    }
 }
 
 impl Pipeline {
@@ -263,6 +376,8 @@ pub enum PipelineError {
     SinkFull,
     #[error("pipeline worker thread panicked")]
     WorkerPanic,
+    #[error("pipeline synchronization error: {0}")]
+    Synchronization(String),
     #[error(transparent)]
     Network(#[from] NetworkError),
 }
