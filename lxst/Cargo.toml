@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 lxst-core.workspace = true
+opus.workspace = true
 rns-core.workspace = true
 rns-crypto.workspace = true
 rns-net.workspace = true

@@ -1,8 +1,9 @@
 use lxst::audio::AudioFilter;
 use lxst::{
     Agc, AudioCodec, AudioFrame, CallProfile, CallState, CallerPolicy, CodecError, Mixer,
-    RawBitDepth, RawCodec, Signal, SignalCode, Telephone, TelephoneConfig, ToneSource,
+    OpusCodec, RawBitDepth, RawCodec, Signal, SignalCode, Telephone, TelephoneConfig, ToneSource,
 };
+use lxst_core::CodecProfile;
 
 #[test]
 fn raw_codec_round_trips_f32_frames() {
@@ -24,6 +25,56 @@ fn raw_codec_rejects_unsupported_float16_encode() {
     assert!(matches!(
         codec.encode(&frame),
         Err(CodecError::Unsupported(_))
+    ));
+}
+
+#[test]
+fn opus_codec_round_trips_voice_frame() {
+    let samples: Vec<f32> = (0..160)
+        .map(|n| ((n as f32 / 8_000.0) * 440.0 * std::f32::consts::TAU).sin() * 0.2)
+        .collect();
+    let frame = AudioFrame::new(8_000, 1, samples).unwrap();
+    let mut codec = OpusCodec::new(CodecProfile::OpusVoiceLow);
+
+    let encoded = codec.encode(&frame).unwrap();
+    assert!(!encoded.is_empty());
+    assert!(encoded.len() <= 15);
+
+    let decoded = codec.decode(&encoded, 8_000).unwrap();
+    assert_eq!(decoded.samplerate(), 8_000);
+    assert_eq!(decoded.channels(), 1);
+    assert_eq!(decoded.frame_count(), 160);
+}
+
+#[test]
+fn opus_codec_resamples_and_normalizes_channels() {
+    let samples: Vec<f32> = (0..960)
+        .flat_map(|n| {
+            let sample = ((n as f32 / 48_000.0) * 220.0 * std::f32::consts::TAU).sin() * 0.2;
+            [sample, -sample]
+        })
+        .collect();
+    let frame = AudioFrame::new(48_000, 2, samples).unwrap();
+    let mut codec = OpusCodec::new(CodecProfile::OpusVoiceLow);
+
+    let encoded = codec.encode(&frame).unwrap();
+    let decoded = codec.decode(&encoded, 8_000).unwrap();
+    assert_eq!(decoded.samplerate(), 8_000);
+    assert_eq!(decoded.channels(), 1);
+    assert_eq!(decoded.frame_count(), 160);
+}
+
+#[test]
+fn opus_codec_rejects_invalid_frame_duration() {
+    let frame = AudioFrame::new(8_000, 1, vec![0.0; 123]).unwrap();
+    let mut codec = OpusCodec::new(CodecProfile::OpusVoiceLow);
+
+    assert!(matches!(
+        codec.encode(&frame),
+        Err(CodecError::InvalidFrameDuration {
+            sample_count: 123,
+            samplerate: 8_000,
+        })
     ));
 }
 
