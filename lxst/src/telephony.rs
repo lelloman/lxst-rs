@@ -20,6 +20,8 @@ pub struct TelephoneConfig {
     pub use_agc: bool,
     pub auto_answer_after: Option<Duration>,
     pub busy_tone_duration: Duration,
+    pub transmit_start_skip: Duration,
+    pub transmit_start_ease_in: Duration,
 }
 
 impl Default for TelephoneConfig {
@@ -37,6 +39,8 @@ impl Default for TelephoneConfig {
             use_agc: true,
             auto_answer_after: None,
             busy_tone_duration: Duration::from_millis(4_250),
+            transmit_start_skip: Duration::from_millis(75),
+            transmit_start_ease_in: Duration::from_millis(225),
         }
     }
 }
@@ -257,6 +261,22 @@ impl Telephone {
 
     pub fn set_busy_tone_duration(&mut self, duration: Duration) {
         self.config.busy_tone_duration = duration;
+    }
+
+    pub fn transmit_start_skip(&self) -> Duration {
+        self.config.transmit_start_skip
+    }
+
+    pub fn set_transmit_start_skip(&mut self, duration: Duration) {
+        self.config.transmit_start_skip = duration;
+    }
+
+    pub fn transmit_start_ease_in(&self) -> Duration {
+        self.config.transmit_start_ease_in
+    }
+
+    pub fn set_transmit_start_ease_in(&mut self, duration: Duration) {
+        self.config.transmit_start_ease_in = duration;
     }
 
     pub fn set_low_latency_output(&mut self, enabled: bool) {

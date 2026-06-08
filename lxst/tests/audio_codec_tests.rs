@@ -316,6 +316,8 @@ fn telephone_updates_audio_control_settings() {
     telephone.mute_transmit(true);
     telephone.set_connect_timeout(Duration::from_secs(2));
     telephone.set_busy_tone_duration(Duration::ZERO);
+    telephone.set_transmit_start_skip(Duration::from_millis(10));
+    telephone.set_transmit_start_ease_in(Duration::from_millis(20));
 
     assert_eq!(telephone.receive_gain_db(), 3.0);
     assert_eq!(telephone.transmit_gain_db(), -2.5);
@@ -324,6 +326,11 @@ fn telephone_updates_audio_control_settings() {
     assert!(telephone.transmit_muted());
     assert_eq!(telephone.config().connect_time, Duration::from_secs(2));
     assert_eq!(telephone.busy_tone_duration(), Duration::ZERO);
+    assert_eq!(telephone.transmit_start_skip(), Duration::from_millis(10));
+    assert_eq!(
+        telephone.transmit_start_ease_in(),
+        Duration::from_millis(20)
+    );
 
     let events: Vec<_> = rx.try_iter().collect();
     assert!(events.contains(&lxst::telephony::CallEvent::ReceiveGainChanged(3.0)));
