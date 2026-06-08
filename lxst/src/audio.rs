@@ -1,6 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::f32::consts::PI;
 
+use cpal::traits::{DeviceTrait, HostTrait};
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioFrame {
     samplerate: u32,
@@ -90,6 +92,8 @@ pub enum AudioError {
     SampleCountNotDivisible { samples: usize, channels: u8 },
     #[error("audio frames are incompatible")]
     IncompatibleFrames,
+    #[error("audio device error: {0}")]
+    Device(String),
 }
 
 pub trait AudioFilter: Send {
@@ -387,5 +391,114 @@ impl ToneSource {
             }
         }
         AudioFrame::new(self.samplerate, self.channels, samples)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioDeviceKind {
+    Input,
+    Output,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioDeviceInfo {
+    pub name: String,
+    pub kind: AudioDeviceKind,
+    pub is_default: bool,
+    pub default_config: Option<AudioStreamConfigInfo>,
+    pub supported_configs: Vec<AudioStreamConfigInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioStreamConfigInfo {
+    pub channels: u16,
+    pub sample_format: String,
+    pub min_sample_rate: u32,
+    pub max_sample_rate: u32,
+    pub buffer_size: Option<(u32, u32)>,
+}
+
+pub fn list_audio_devices() -> Result<Vec<AudioDeviceInfo>, AudioError> {
+    let host = cpal::default_host();
+    let default_input = host.default_input_device().map(|device| device.to_string());
+    let default_output = host
+        .default_output_device()
+        .map(|device| device.to_string());
+
+    let mut devices = Vec::new();
+    let input_devices = host
+        .input_devices()
+        .map_err(|err| AudioError::Device(err.to_string()))?;
+    for device in input_devices {
+        devices.push(device_info(
+            &device,
+            AudioDeviceKind::Input,
+            default_input.as_deref(),
+        ));
+    }
+
+    let output_devices = host
+        .output_devices()
+        .map_err(|err| AudioError::Device(err.to_string()))?;
+    for device in output_devices {
+        devices.push(device_info(
+            &device,
+            AudioDeviceKind::Output,
+            default_output.as_deref(),
+        ));
+    }
+
+    Ok(devices)
+}
+
+fn device_info(
+    device: &cpal::Device,
+    kind: AudioDeviceKind,
+    default_name: Option<&str>,
+) -> AudioDeviceInfo {
+    let name = device.to_string();
+    let default_config = match kind {
+        AudioDeviceKind::Input => device.default_input_config().ok(),
+        AudioDeviceKind::Output => device.default_output_config().ok(),
+    }
+    .map(|config| AudioStreamConfigInfo {
+        channels: config.channels(),
+        sample_format: config.sample_format().to_string(),
+        min_sample_rate: config.sample_rate(),
+        max_sample_rate: config.sample_rate(),
+        buffer_size: None,
+    });
+
+    let supported_configs = match kind {
+        AudioDeviceKind::Input => device
+            .supported_input_configs()
+            .map(|configs| configs.map(stream_config_info).collect())
+            .unwrap_or_default(),
+        AudioDeviceKind::Output => device
+            .supported_output_configs()
+            .map(|configs| configs.map(stream_config_info).collect())
+            .unwrap_or_default(),
+    };
+
+    AudioDeviceInfo {
+        is_default: default_name == Some(name.as_str()),
+        name,
+        kind,
+        default_config,
+        supported_configs,
+    }
+}
+
+fn stream_config_info(config: cpal::SupportedStreamConfigRange) -> AudioStreamConfigInfo {
+    let buffer_size = match config.buffer_size() {
+        cpal::SupportedBufferSize::Range { min, max } => Some((*min, *max)),
+        cpal::SupportedBufferSize::Unknown => None,
+    };
+    AudioStreamConfigInfo {
+        channels: config.channels(),
+        sample_format: config.sample_format().to_string(),
+        min_sample_rate: config.min_sample_rate(),
+        max_sample_rate: config.max_sample_rate(),
+        buffer_size,
     }
 }

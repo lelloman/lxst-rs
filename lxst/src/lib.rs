@@ -8,7 +8,10 @@ pub mod telephony;
 
 pub use lxst_core as core;
 
-pub use audio::{Agc, AudioFrame, BandPass, HighPass, LowPass, Mixer, ToneSource};
+pub use audio::{
+    list_audio_devices, Agc, AudioDeviceInfo, AudioDeviceKind, AudioFrame, AudioStreamConfigInfo,
+    BandPass, HighPass, LowPass, Mixer, ToneSource,
+};
 pub use codec::{
     AudioCodec, Codec2Codec, CodecError, CodecFactory, CodecSelection, CodecState, NullCodec,
     OpusCodec, RawCodec,

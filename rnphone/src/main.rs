@@ -34,14 +34,38 @@ fn run(args: Vec<String>) -> Result<(), String> {
         return Ok(());
     }
     if args.list_devices {
-        println!("Available audio devices:");
-        println!("  Audio device enumeration is not wired yet in this Rust milestone");
+        print_audio_devices();
         return Ok(());
     }
 
     let config_dir = args.config.unwrap_or_else(default_config_dir);
     let mut app = App::load(config_dir, args.service)?;
     app.start()
+}
+
+fn print_audio_devices() {
+    println!("Available audio devices:");
+    match lxst::list_audio_devices() {
+        Ok(devices) if devices.is_empty() => println!("  (no audio devices found)"),
+        Ok(devices) => {
+            for device in devices {
+                let kind = match device.kind {
+                    lxst::AudioDeviceKind::Input => "input",
+                    lxst::AudioDeviceKind::Output => "output",
+                };
+                let default = if device.is_default { " default" } else { "" };
+                if let Some(config) = device.default_config {
+                    println!(
+                        "  [{kind}{default}] {} - {} ch, {} Hz, {}",
+                        device.name, config.channels, config.min_sample_rate, config.sample_format
+                    );
+                } else {
+                    println!("  [{kind}{default}] {}", device.name);
+                }
+            }
+        }
+        Err(err) => println!("  audio device enumeration failed: {err}"),
+    }
 }
 
 #[derive(Debug, Default)]

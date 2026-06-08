@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 codec2.workspace = true
+cpal.workspace = true
 lxst-core.workspace = true
 opus.workspace = true
 rns-core.workspace = true
