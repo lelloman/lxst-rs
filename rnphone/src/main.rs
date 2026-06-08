@@ -144,6 +144,7 @@ impl App {
         service: bool,
     ) -> Result<Self, String> {
         fs::create_dir_all(config_dir.join("storage")).map_err(|e| e.to_string())?;
+        install_default_sound_assets(&config_dir)?;
         let config_path = config_dir.join("config");
         if !config_path.exists() {
             fs::write(&config_path, DEFAULT_CONFIG).map_err(|e| e.to_string())?;
@@ -629,6 +630,21 @@ fn systemd_unit() -> String {
     )
 }
 
+const DEFAULT_SOUND_ASSETS: &[(&str, &[u8])] = &[
+    ("ringer.opus", include_bytes!("../assets/ringer.opus")),
+    ("soft.opus", include_bytes!("../assets/soft.opus")),
+];
+
+fn install_default_sound_assets(config_dir: &Path) -> Result<(), String> {
+    for (filename, bytes) in DEFAULT_SOUND_ASSETS {
+        let path = config_dir.join(filename);
+        if !path.exists() {
+            fs::write(path, bytes).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 const DEFAULT_CONFIG: &str = r#"# This is an example rnphone config file.
 
 [telephone]
@@ -718,5 +734,49 @@ mod tests {
         let by_alias = config.resolve_dial_target("12").unwrap();
         assert_eq!(by_name.identity_hash, by_alias.identity_hash);
         assert_eq!(by_alias.label, "Mary (12)");
+    }
+
+    #[test]
+    fn installs_default_sound_assets_when_missing() {
+        let dir = temp_config_dir("install-assets");
+        fs::create_dir_all(&dir).unwrap();
+
+        install_default_sound_assets(&dir).unwrap();
+
+        assert!(fs::read(dir.join("ringer.opus"))
+            .unwrap()
+            .starts_with(b"OggS"));
+        assert!(fs::read(dir.join("soft.opus"))
+            .unwrap()
+            .starts_with(b"OggS"));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn keeps_existing_sound_assets() {
+        let dir = temp_config_dir("keep-assets");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("ringer.opus"), b"custom").unwrap();
+
+        install_default_sound_assets(&dir).unwrap();
+
+        assert_eq!(fs::read(dir.join("ringer.opus")).unwrap(), b"custom");
+        assert!(fs::read(dir.join("soft.opus"))
+            .unwrap()
+            .starts_with(b"OggS"));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn temp_config_dir(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        env::temp_dir().join(format!(
+            "lxst-rs-rnphone-{name}-{}-{nanos}",
+            std::process::id()
+        ))
     }
 }
