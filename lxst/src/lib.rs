@@ -20,7 +20,8 @@ pub use codec::{
 };
 pub use media::{FilePlayer, FileRecorder, MediaError, OpusFileSink, OpusFileSource};
 pub use network::{
-    LinkSource, LxstLinkSender, NetworkError, PacketSender, Packetizer, TelephonyEndpoint,
+    telephony_callback_channel, LinkSource, LxstLinkSender, NetworkError, PacketSender, Packetizer,
+    TelephonyCallbacks, TelephonyEndpoint, TelephonyNetworkEvent,
 };
 pub use pipeline::{
     AudioSink, AudioSource, BufferedSink, BufferedSource, EncodedAudioFrame, Pipeline,

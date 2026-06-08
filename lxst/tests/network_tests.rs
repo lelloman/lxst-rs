@@ -1,8 +1,9 @@
 use lxst::{
     AudioSink, AudioSource, EncodedAudioFrame, LinkSource, NetworkError, PacketSender, Packetizer,
-    RawBitDepth, RawCodec,
+    RawBitDepth, RawCodec, TelephonyCallbacks, TelephonyNetworkEvent,
 };
 use lxst_core::{CodecKind, EncodedFrame, LxstPacket, Signal, SignalCode};
+use rns_net::Callbacks;
 
 #[derive(Debug, Default)]
 struct MockSender {
@@ -118,4 +119,22 @@ fn link_source_applies_frame_backpressure() {
         .unwrap();
 
     assert_eq!(source.queued_frames(), 1);
+}
+
+#[test]
+fn telephony_callbacks_forward_link_data_events() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut callbacks = TelephonyCallbacks::new(tx);
+    let link_id = rns_net::LinkId([0x77; 16]);
+
+    callbacks.on_link_data(link_id, 0, vec![1, 2, 3]);
+
+    assert!(matches!(
+        rx.recv().unwrap(),
+        TelephonyNetworkEvent::LinkData {
+            link_id: id,
+            context: 0,
+            data
+        } if id == link_id && data == vec![1, 2, 3]
+    ));
 }

@@ -1,13 +1,13 @@
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use lxst_core::{CodecKind, EncodedFrame, LxstPacket, PacketError, Signal};
 use rns_core::constants::CONTEXT_NONE;
-use rns_core::types::DestHash;
+use rns_core::types::{DestHash, IdentityHash, LinkId, PacketHash};
 use rns_crypto::identity::Identity;
-use rns_net::{AnnouncedIdentity, Destination, RnsNode, SendError};
+use rns_net::{AnnouncedIdentity, Callbacks, Destination, RnsNode, SendError, TeardownReason};
 
 use crate::audio::AudioFrame;
 use crate::codec::{AudioCodec, CodecFactory, CodecSelection, NullCodec};
@@ -15,6 +15,117 @@ use crate::pipeline::{AudioSink, AudioSource, EncodedAudioFrame, PipelineError};
 
 pub const APP_NAME: &str = "lxst";
 pub const TELEPHONY_PRIMITIVE: &str = "telephony";
+
+#[derive(Debug, Clone)]
+pub enum TelephonyNetworkEvent {
+    Announce(AnnouncedIdentity),
+    PathUpdated {
+        dest_hash: DestHash,
+        hops: u8,
+    },
+    LocalDelivery {
+        dest_hash: DestHash,
+        raw: Vec<u8>,
+        packet_hash: PacketHash,
+    },
+    LinkEstablished {
+        link_id: LinkId,
+        dest_hash: DestHash,
+        rtt: f64,
+        is_initiator: bool,
+    },
+    LinkClosed {
+        link_id: LinkId,
+        reason: Option<TeardownReason>,
+    },
+    RemoteIdentified {
+        link_id: LinkId,
+        identity_hash: IdentityHash,
+        public_key: [u8; 64],
+    },
+    LinkData {
+        link_id: LinkId,
+        context: u8,
+        data: Vec<u8>,
+    },
+}
+
+pub struct TelephonyCallbacks {
+    events: mpsc::Sender<TelephonyNetworkEvent>,
+}
+
+impl TelephonyCallbacks {
+    pub fn new(events: mpsc::Sender<TelephonyNetworkEvent>) -> Self {
+        Self { events }
+    }
+}
+
+impl Callbacks for TelephonyCallbacks {
+    fn on_announce(&mut self, announced: AnnouncedIdentity) {
+        let _ = self.events.send(TelephonyNetworkEvent::Announce(announced));
+    }
+
+    fn on_path_updated(&mut self, dest_hash: DestHash, hops: u8) {
+        let _ = self
+            .events
+            .send(TelephonyNetworkEvent::PathUpdated { dest_hash, hops });
+    }
+
+    fn on_local_delivery(&mut self, dest_hash: DestHash, raw: Vec<u8>, packet_hash: PacketHash) {
+        let _ = self.events.send(TelephonyNetworkEvent::LocalDelivery {
+            dest_hash,
+            raw,
+            packet_hash,
+        });
+    }
+
+    fn on_link_established(
+        &mut self,
+        link_id: LinkId,
+        dest_hash: DestHash,
+        rtt: f64,
+        is_initiator: bool,
+    ) {
+        let _ = self.events.send(TelephonyNetworkEvent::LinkEstablished {
+            link_id,
+            dest_hash,
+            rtt,
+            is_initiator,
+        });
+    }
+
+    fn on_link_closed(&mut self, link_id: LinkId, reason: Option<TeardownReason>) {
+        let _ = self
+            .events
+            .send(TelephonyNetworkEvent::LinkClosed { link_id, reason });
+    }
+
+    fn on_remote_identified(
+        &mut self,
+        link_id: LinkId,
+        identity_hash: IdentityHash,
+        public_key: [u8; 64],
+    ) {
+        let _ = self.events.send(TelephonyNetworkEvent::RemoteIdentified {
+            link_id,
+            identity_hash,
+            public_key,
+        });
+    }
+
+    fn on_link_data(&mut self, link_id: LinkId, context: u8, data: Vec<u8>) {
+        let _ = self.events.send(TelephonyNetworkEvent::LinkData {
+            link_id,
+            context,
+            data,
+        });
+    }
+}
+
+pub fn telephony_callback_channel() -> (Box<dyn Callbacks>, mpsc::Receiver<TelephonyNetworkEvent>) {
+    let (tx, rx) = mpsc::channel();
+    (Box::new(TelephonyCallbacks::new(tx)), rx)
+}
 
 #[derive(Debug, Clone)]
 pub struct TelephonyEndpoint {
