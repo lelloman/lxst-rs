@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use lxst_core::{CallProfile, Signal, SignalCode};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TelephoneConfig {
     pub ring_time: Duration,
     pub wait_time: Duration,
@@ -13,8 +13,8 @@ pub struct TelephoneConfig {
     pub profile: CallProfile,
     pub allowed_callers: CallerPolicy,
     pub blocked_callers: HashSet<[u8; 16]>,
-    pub receive_gain_db: i16,
-    pub transmit_gain_db: i16,
+    pub receive_gain_db: f32,
+    pub transmit_gain_db: f32,
     pub use_agc: bool,
     pub auto_answer_after: Option<Duration>,
 }
@@ -29,8 +29,8 @@ impl Default for TelephoneConfig {
             profile: CallProfile::DEFAULT,
             allowed_callers: CallerPolicy::All,
             blocked_callers: HashSet::new(),
-            receive_gain_db: 0,
-            transmit_gain_db: 0,
+            receive_gain_db: 0.0,
+            transmit_gain_db: 0.0,
             use_agc: true,
             auto_answer_after: None,
         }
@@ -65,7 +65,7 @@ pub enum CallState {
     Terminating,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CallEvent {
     StateChanged(CallState),
     IncomingCall {
@@ -88,6 +88,11 @@ pub enum CallEvent {
         state: CallState,
     },
     LowLatencyOutputChanged(bool),
+    ReceiveGainChanged(f32),
+    TransmitGainChanged(f32),
+    ReceiveMutedChanged(bool),
+    TransmitMutedChanged(bool),
+    AgcChanged(bool),
     ProfileChanged(CallProfile),
     SignalReceived(Signal),
 }
@@ -100,6 +105,8 @@ pub struct Telephone {
     active_profile: CallProfile,
     external_busy: bool,
     low_latency_output: bool,
+    receive_muted: bool,
+    transmit_muted: bool,
     call_deadline: Option<Instant>,
     auto_answer_deadline: Option<Instant>,
     events: mpsc::Sender<CallEvent>,
@@ -117,6 +124,8 @@ impl Telephone {
                 active_profile,
                 external_busy: false,
                 low_latency_output: false,
+                receive_muted: false,
+                transmit_muted: false,
                 call_deadline: None,
                 auto_answer_deadline: None,
                 events,
@@ -139,6 +148,77 @@ impl Telephone {
 
     pub fn low_latency_output(&self) -> bool {
         self.low_latency_output
+    }
+
+    pub fn receive_gain_db(&self) -> f32 {
+        self.config.receive_gain_db
+    }
+
+    pub fn set_receive_gain_db(&mut self, gain_db: f32) {
+        if self.config.receive_gain_db != gain_db {
+            self.config.receive_gain_db = gain_db;
+            let _ = self.events.send(CallEvent::ReceiveGainChanged(gain_db));
+        }
+    }
+
+    pub fn transmit_gain_db(&self) -> f32 {
+        self.config.transmit_gain_db
+    }
+
+    pub fn set_transmit_gain_db(&mut self, gain_db: f32) {
+        if self.config.transmit_gain_db != gain_db {
+            self.config.transmit_gain_db = gain_db;
+            let _ = self.events.send(CallEvent::TransmitGainChanged(gain_db));
+        }
+    }
+
+    pub fn use_agc(&self) -> bool {
+        self.config.use_agc
+    }
+
+    pub fn enable_agc(&mut self, enable: bool) {
+        if self.config.use_agc != enable {
+            self.config.use_agc = enable;
+            let _ = self.events.send(CallEvent::AgcChanged(enable));
+        }
+    }
+
+    pub fn disable_agc(&mut self, disable: bool) {
+        self.enable_agc(!disable);
+    }
+
+    pub fn receive_muted(&self) -> bool {
+        self.receive_muted
+    }
+
+    pub fn mute_receive(&mut self, mute: bool) {
+        if self.receive_muted != mute {
+            self.receive_muted = mute;
+            let _ = self.events.send(CallEvent::ReceiveMutedChanged(mute));
+        }
+    }
+
+    pub fn unmute_receive(&mut self, unmute: bool) {
+        self.mute_receive(!unmute);
+    }
+
+    pub fn transmit_muted(&self) -> bool {
+        self.transmit_muted
+    }
+
+    pub fn mute_transmit(&mut self, mute: bool) {
+        if self.transmit_muted != mute {
+            self.transmit_muted = mute;
+            let _ = self.events.send(CallEvent::TransmitMutedChanged(mute));
+        }
+    }
+
+    pub fn unmute_transmit(&mut self, unmute: bool) {
+        self.mute_transmit(!unmute);
+    }
+
+    pub fn set_connect_timeout(&mut self, timeout: Duration) {
+        self.config.connect_time = timeout;
     }
 
     pub fn set_low_latency_output(&mut self, enabled: bool) {
@@ -240,17 +320,13 @@ impl Telephone {
     }
 
     pub fn hangup(&mut self) {
-        let identity_hash = self.active_identity.take();
-        self.call_deadline = None;
-        self.auto_answer_deadline = None;
+        let identity_hash = self.clear_active_call();
         self.set_state(CallState::Available);
         let _ = self.events.send(CallEvent::CallEnded { identity_hash });
     }
 
     pub fn reject(&mut self) {
-        let identity_hash = self.active_identity.take();
-        self.call_deadline = None;
-        self.auto_answer_deadline = None;
+        let identity_hash = self.clear_active_call();
         self.set_state(CallState::Available);
         let _ = self.events.send(CallEvent::Rejected { identity_hash });
     }
@@ -283,7 +359,7 @@ impl Telephone {
         let _ = self.events.send(CallEvent::SignalReceived(signal));
         match signal {
             Signal::Code(SignalCode::Busy) => {
-                let identity_hash = self.active_identity.take();
+                let identity_hash = self.clear_active_call();
                 self.set_state(CallState::Available);
                 let _ = self.events.send(CallEvent::Busy { identity_hash });
             }
@@ -313,5 +389,11 @@ impl Telephone {
             self.state = state;
             let _ = self.events.send(CallEvent::StateChanged(state));
         }
+    }
+
+    fn clear_active_call(&mut self) -> Option<[u8; 16]> {
+        self.call_deadline = None;
+        self.auto_answer_deadline = None;
+        self.active_identity.take()
     }
 }

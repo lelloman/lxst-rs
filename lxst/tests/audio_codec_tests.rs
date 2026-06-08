@@ -287,6 +287,58 @@ fn telephone_low_latency_output_setting_emits_change() {
 }
 
 #[test]
+fn telephone_updates_audio_control_settings() {
+    let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
+
+    telephone.set_receive_gain_db(3.0);
+    telephone.set_transmit_gain_db(-2.5);
+    telephone.disable_agc(true);
+    telephone.mute_receive(true);
+    telephone.mute_transmit(true);
+    telephone.set_connect_timeout(Duration::from_secs(2));
+
+    assert_eq!(telephone.receive_gain_db(), 3.0);
+    assert_eq!(telephone.transmit_gain_db(), -2.5);
+    assert!(!telephone.use_agc());
+    assert!(telephone.receive_muted());
+    assert!(telephone.transmit_muted());
+    assert_eq!(telephone.config().connect_time, Duration::from_secs(2));
+
+    let events: Vec<_> = rx.try_iter().collect();
+    assert!(events.contains(&lxst::telephony::CallEvent::ReceiveGainChanged(3.0)));
+    assert!(events.contains(&lxst::telephony::CallEvent::TransmitGainChanged(-2.5)));
+    assert!(events.contains(&lxst::telephony::CallEvent::AgcChanged(false)));
+    assert!(events.contains(&lxst::telephony::CallEvent::ReceiveMutedChanged(true)));
+    assert!(events.contains(&lxst::telephony::CallEvent::TransmitMutedChanged(true)));
+}
+
+#[test]
+fn telephone_busy_signal_clears_pending_timeout() {
+    let remote = [0x24; 16];
+    let config = TelephoneConfig {
+        wait_time: Duration::ZERO,
+        ..TelephoneConfig::default()
+    };
+    let (mut telephone, rx) = Telephone::new(config);
+
+    assert!(telephone.begin_outgoing_call(remote));
+    telephone.apply_signal(Signal::Code(SignalCode::Busy));
+    telephone.tick();
+
+    assert_eq!(telephone.state(), CallState::Available);
+    let events: Vec<_> = rx.try_iter().collect();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        lxst::telephony::CallEvent::Busy {
+            identity_hash: Some(identity)
+        } if *identity == remote
+    )));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, lxst::telephony::CallEvent::TimedOut { .. })));
+}
+
+#[test]
 fn caller_policy_list_allows_only_members() {
     let allowed = [0x01; 16];
     let denied = [0x02; 16];
