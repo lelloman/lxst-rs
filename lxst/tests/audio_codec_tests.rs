@@ -360,6 +360,23 @@ fn telephone_busy_signal_clears_pending_timeout() {
 }
 
 #[test]
+fn telephone_hangup_resets_mute_state() {
+    let remote = [0x25; 16];
+    let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
+    assert!(telephone.begin_outgoing_call(remote));
+    telephone.mute_receive(true);
+    telephone.mute_transmit(true);
+
+    telephone.hangup();
+
+    assert!(!telephone.receive_muted());
+    assert!(!telephone.transmit_muted());
+    let events: Vec<_> = rx.try_iter().collect();
+    assert!(events.contains(&lxst::telephony::CallEvent::ReceiveMutedChanged(false)));
+    assert!(events.contains(&lxst::telephony::CallEvent::TransmitMutedChanged(false)));
+}
+
+#[test]
 fn caller_policy_list_allows_only_members() {
     let allowed = [0x01; 16];
     let denied = [0x02; 16];

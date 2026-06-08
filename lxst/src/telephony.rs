@@ -432,6 +432,18 @@ impl Telephone {
     fn clear_active_call(&mut self) -> Option<[u8; 16]> {
         self.call_deadline = None;
         self.auto_answer_deadline = None;
+        self.clear_mutes();
         self.active_identity.take()
+    }
+
+    fn clear_mutes(&mut self) {
+        if self.receive_muted {
+            self.receive_muted = false;
+            let _ = self.events.send(CallEvent::ReceiveMutedChanged(false));
+        }
+        if self.transmit_muted {
+            self.transmit_muted = false;
+            let _ = self.events.send(CallEvent::TransmitMutedChanged(false));
+        }
     }
 }
