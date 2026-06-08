@@ -16,6 +16,7 @@ use crate::pipeline::{AudioSource, PipelineError};
 const OPUS_SERIAL: u32 = 0x4c58_5354;
 const OPUS_PRESKIP: u16 = 312;
 const OPUS_GRANULE_RATE: u32 = 48_000;
+const OPUS_FINAL_SILENCE_FRAMES: usize = 10;
 
 pub struct OpusFileSink {
     path: PathBuf,
@@ -23,6 +24,7 @@ pub struct OpusFileSink {
     codec: OpusCodec,
     writer: PacketWriter<'static, File>,
     samples_written_48k: u64,
+    last_output_frame_samples: Option<usize>,
     finalized: bool,
 }
 
@@ -44,6 +46,7 @@ impl OpusFileSink {
             codec: OpusCodec::new(profile),
             writer,
             samples_written_48k: 0,
+            last_output_frame_samples: None,
             finalized: false,
         })
     }
@@ -57,13 +60,22 @@ impl OpusFileSink {
     }
 
     pub fn handle_frame(&mut self, frame: &AudioFrame) -> Result<(), MediaError> {
+        self.write_frame(frame, true)
+    }
+
+    fn write_frame(
+        &mut self,
+        frame: &AudioFrame,
+        remember_duration: bool,
+    ) -> Result<(), MediaError> {
         let info = OpusCodec::profile_info(self.profile)?;
         let encoded = self.codec.encode(frame)?;
-        let frame_samples = frame
-            .resampled(info.samplerate)?
-            .frame_count()
-            .saturating_mul(OPUS_GRANULE_RATE as usize)
+        let output_frame_count = frame.resampled(info.samplerate)?.frame_count();
+        let frame_samples = output_frame_count.saturating_mul(OPUS_GRANULE_RATE as usize)
             / info.samplerate as usize;
+        if remember_duration {
+            self.last_output_frame_samples = Some(output_frame_count);
+        }
         self.samples_written_48k += frame_samples as u64;
         self.writer.write_packet(
             encoded,
@@ -76,6 +88,13 @@ impl OpusFileSink {
 
     pub fn finalize(&mut self) -> Result<(), MediaError> {
         if !self.finalized {
+            if let Some(frame_samples) = self.last_output_frame_samples {
+                let info = OpusCodec::profile_info(self.profile)?;
+                let silence = AudioFrame::silence(info.samplerate, info.channels, frame_samples)?;
+                for _ in 0..OPUS_FINAL_SILENCE_FRAMES {
+                    self.write_frame(&silence, false)?;
+                }
+            }
             self.writer.write_packet(
                 Vec::<u8>::new(),
                 OPUS_SERIAL,

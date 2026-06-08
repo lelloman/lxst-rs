@@ -6,14 +6,7 @@ use lxst_core::CodecProfile;
 
 #[test]
 fn ogg_opus_file_sink_and_source_round_trip_audio() {
-    let path = std::env::temp_dir().join(format!(
-        "lxst-rs-media-{}-{}.opus",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let path = temp_opus_path("round-trip");
     let samples: Vec<f32> = (0..960)
         .flat_map(|n| {
             let sample = ((n as f32 / 48_000.0) * 440.0 * std::f32::consts::TAU).sin() * 0.2;
@@ -43,4 +36,32 @@ fn ogg_opus_file_sink_and_source_round_trip_audio() {
     assert!(decoded.frame_count() > 0);
 
     let _ = fs::remove_file(path);
+}
+
+#[test]
+fn ogg_opus_file_sink_writes_final_silence_padding() {
+    let path = temp_opus_path("padding");
+    let frame = AudioFrame::new(48_000, 2, vec![0.0; 960 * 2]).unwrap();
+
+    {
+        let mut sink = OpusFileSink::create(&path, CodecProfile::OpusAudioMax).unwrap();
+        sink.handle_frame(&frame).unwrap();
+        sink.finalize().unwrap();
+    }
+
+    let source = OpusFileSource::open(&path, 20, false).unwrap();
+    assert!(source.len_samples() >= 960 * 10);
+
+    let _ = fs::remove_file(path);
+}
+
+fn temp_opus_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "lxst-rs-media-{name}-{}-{}.opus",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
 }
