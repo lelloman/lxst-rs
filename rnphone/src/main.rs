@@ -148,7 +148,7 @@ impl App {
         if !config_path.exists() {
             fs::write(&config_path, DEFAULT_CONFIG).map_err(|e| e.to_string())?;
         }
-        let config =
+        let mut config =
             RnphoneConfig::parse(&fs::read_to_string(&config_path).map_err(|e| e.to_string())?)?;
         let identity_path = config_dir.join("identity");
         let identity = if identity_path.exists() {
@@ -158,6 +158,7 @@ impl App {
             save_identity(&identity, &identity_path).map_err(|e| e.to_string())?;
             identity
         };
+        config.finalize_for_identity(identity.hash());
 
         let telephone_config = TelephoneConfig {
             allowed_callers: config.allowed_callers.clone(),
@@ -242,7 +243,13 @@ impl App {
                     decode_hex_into(value, &mut hash)?;
                     self.dial_hash(&endpoint, hash)?;
                 }
-                other => println!("Unknown command: {other}"),
+                other => match self.config.resolve_dial_target(other) {
+                    Some(target) => {
+                        println!("Calling {}", target.label);
+                        self.dial_hash(&endpoint, target.identity_hash)?;
+                    }
+                    None => println!("Unknown command: {other}"),
+                },
             }
             self.telephone.tick();
         }
@@ -409,6 +416,7 @@ impl App {
 struct RnphoneConfig {
     phonebook: HashMap<String, PhonebookEntry>,
     allowed_callers: lxst::CallerPolicy,
+    allow_phonebook_callers: bool,
     blocked_callers: HashSet<[u8; 16]>,
 }
 
@@ -417,6 +425,7 @@ impl Default for RnphoneConfig {
         Self {
             phonebook: HashMap::new(),
             allowed_callers: lxst::CallerPolicy::All,
+            allow_phonebook_callers: false,
             blocked_callers: HashSet::new(),
         }
     }
@@ -442,7 +451,12 @@ impl RnphoneConfig {
             let value = value.trim();
             match section.as_str() {
                 "telephone" if key == "allowed_callers" => {
-                    config.allowed_callers = parse_allowed_callers(value)?;
+                    if value.eq_ignore_ascii_case("phonebook") {
+                        config.allow_phonebook_callers = true;
+                        config.allowed_callers = lxst::CallerPolicy::List(HashSet::new());
+                    } else {
+                        config.allowed_callers = parse_allowed_callers(value)?;
+                    }
                 }
                 "telephone" if key == "blocked_callers" => {
                     for item in split_list(value) {
@@ -468,7 +482,49 @@ impl RnphoneConfig {
                 _ => {}
             }
         }
+        if config.allow_phonebook_callers {
+            config.allowed_callers = lxst::CallerPolicy::List(
+                config.phonebook.values().map(|e| e.identity_hash).collect(),
+            );
+        }
         Ok(config)
+    }
+
+    fn finalize_for_identity(&mut self, own_hash: &[u8; 16]) {
+        self.phonebook
+            .retain(|_, entry| &entry.identity_hash != own_hash);
+        self.blocked_callers.remove(own_hash);
+        match &mut self.allowed_callers {
+            lxst::CallerPolicy::List(allowed) => {
+                allowed.remove(own_hash);
+                if self.allow_phonebook_callers {
+                    *allowed = self
+                        .phonebook
+                        .values()
+                        .map(|entry| entry.identity_hash)
+                        .collect();
+                }
+            }
+            lxst::CallerPolicy::All | lxst::CallerPolicy::None => {}
+        }
+    }
+
+    fn resolve_dial_target(&self, input: &str) -> Option<DialTarget> {
+        self.phonebook.iter().find_map(|(name, entry)| {
+            let alias_matches = entry.alias.as_deref() == Some(input);
+            let name_matches = name.eq_ignore_ascii_case(input);
+            if alias_matches || name_matches {
+                Some(DialTarget {
+                    label: match &entry.alias {
+                        Some(alias) => format!("{name} ({alias})"),
+                        None => name.clone(),
+                    },
+                    identity_hash: entry.identity_hash,
+                })
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -478,11 +534,16 @@ struct PhonebookEntry {
     alias: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DialTarget {
+    label: String,
+    identity_hash: [u8; 16],
+}
+
 fn parse_allowed_callers(value: &str) -> Result<lxst::CallerPolicy, String> {
     match value.to_ascii_lowercase().as_str() {
         "all" => Ok(lxst::CallerPolicy::All),
         "none" => Ok(lxst::CallerPolicy::None),
-        "phonebook" => Ok(lxst::CallerPolicy::All),
         _ => {
             let mut allowed = HashSet::new();
             for item in split_list(value) {
@@ -609,5 +670,53 @@ mod tests {
             lxst::CallerPolicy::List(list) => assert_eq!(list.len(), 1),
             _ => panic!("expected list"),
         }
+    }
+
+    #[test]
+    fn phonebook_policy_allows_only_phonebook_entries() {
+        let config = RnphoneConfig::parse(
+            "[telephone]\nallowed_callers = phonebook\n\
+             [phonebook]\nMary = f3e8c3359b39d36f3baff0a616a73d3e, 123\n",
+        )
+        .unwrap();
+        match config.allowed_callers {
+            lxst::CallerPolicy::List(list) => {
+                assert!(list.contains(&parse_hash("f3e8c3359b39d36f3baff0a616a73d3e").unwrap()));
+                assert!(!list.contains(&parse_hash("5d2d14619dfa0ff06278c17347c14331").unwrap()));
+            }
+            _ => panic!("expected phonebook caller list"),
+        }
+    }
+
+    #[test]
+    fn finalization_removes_own_identity_from_phonebook_policy() {
+        let own = parse_hash("f3e8c3359b39d36f3baff0a616a73d3e").unwrap();
+        let mut config = RnphoneConfig::parse(
+            "[telephone]\nallowed_callers = phonebook\nblocked_callers = f3e8c3359b39d36f3baff0a616a73d3e\n\
+             [phonebook]\nMary = f3e8c3359b39d36f3baff0a616a73d3e, 123\n\
+             Rudy = 5d2d14619dfa0ff06278c17347c14331, 241\n",
+        )
+        .unwrap();
+        config.finalize_for_identity(&own);
+        assert!(!config.phonebook.contains_key("Mary"));
+        assert!(!config.blocked_callers.contains(&own));
+        match config.allowed_callers {
+            lxst::CallerPolicy::List(list) => {
+                assert_eq!(list.len(), 1);
+                assert!(list.contains(&parse_hash("5d2d14619dfa0ff06278c17347c14331").unwrap()));
+            }
+            _ => panic!("expected phonebook caller list"),
+        }
+    }
+
+    #[test]
+    fn resolves_phonebook_name_and_numeric_alias() {
+        let config =
+            RnphoneConfig::parse("[phonebook]\nMary = f3e8c3359b39d36f3baff0a616a73d3e, A1B2\n")
+                .unwrap();
+        let by_name = config.resolve_dial_target("mary").unwrap();
+        let by_alias = config.resolve_dial_target("12").unwrap();
+        assert_eq!(by_name.identity_hash, by_alias.identity_hash);
+        assert_eq!(by_alias.label, "Mary (12)");
     }
 }
