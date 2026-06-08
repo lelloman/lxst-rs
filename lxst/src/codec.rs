@@ -144,14 +144,37 @@ impl OpusCodec {
     }
 
     pub fn info(&self) -> Result<CodecProfileInfo, CodecError> {
-        let info = self.profile.info();
+        Self::profile_info(self.profile)
+    }
+
+    pub fn profile_info(profile: CodecProfile) -> Result<CodecProfileInfo, CodecError> {
+        let info = profile.info();
         if info.opus_application.is_none() {
             return Err(CodecError::InvalidProfile(format!(
-                "{:?} is not an Opus profile",
-                self.profile
+                "{profile:?} is not an Opus profile"
             )));
         }
         Ok(info)
+    }
+
+    pub fn profile_channels(profile: CodecProfile) -> Result<u8, CodecError> {
+        Ok(Self::profile_info(profile)?.channels)
+    }
+
+    pub fn profile_samplerate(profile: CodecProfile) -> Result<u32, CodecError> {
+        Ok(Self::profile_info(profile)?.samplerate)
+    }
+
+    pub fn profile_application(profile: CodecProfile) -> Result<OpusApplication, CodecError> {
+        Ok(Self::profile_info(profile)?.opus_application.unwrap())
+    }
+
+    pub fn profile_bitrate_ceiling(profile: CodecProfile) -> Result<u32, CodecError> {
+        Ok(Self::profile_info(profile)?.bitrate_ceiling)
+    }
+
+    pub fn max_bytes_per_frame(bitrate_ceiling: u32, frame_duration_ms: f32) -> usize {
+        ((bitrate_ceiling as f32 / 8.0) * (frame_duration_ms / 1000.0)).ceil() as usize
     }
 
     fn encoder(&mut self, info: CodecProfileInfo) -> Result<&mut Encoder, CodecError> {
@@ -195,7 +218,7 @@ impl AudioCodec for OpusCodec {
                 samplerate: info.samplerate,
             })?;
         let max_frame_bytes =
-            max_bytes_per_frame(info.bitrate_ceiling, frame_duration_tenths).max(1);
+            max_bytes_per_frame_tenths(info.bitrate_ceiling, frame_duration_tenths).max(1);
         let input: Vec<i16> = resampled
             .into_iter()
             .map(|sample| (sample.clamp(-1.0, 1.0) * 32767.0) as i16)
@@ -469,7 +492,7 @@ fn valid_opus_frame_duration_tenths(sample_count: usize, samplerate: u32) -> Opt
         .find(|tenths| (samplerate as u64 * *tenths as u64) == sample_count as u64 * 10_000)
 }
 
-fn max_bytes_per_frame(bitrate_ceiling: u32, frame_duration_tenths_ms: u32) -> usize {
+fn max_bytes_per_frame_tenths(bitrate_ceiling: u32, frame_duration_tenths_ms: u32) -> usize {
     ((bitrate_ceiling as u64 * frame_duration_tenths_ms as u64).div_ceil(80_000)) as usize
 }
 

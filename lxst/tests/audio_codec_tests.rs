@@ -81,6 +81,25 @@ fn opus_codec_rejects_invalid_frame_duration() {
 }
 
 #[test]
+fn opus_profile_helpers_match_python_tables() {
+    assert_eq!(
+        OpusCodec::profile_channels(CodecProfile::OpusVoiceMax).unwrap(),
+        2
+    );
+    assert_eq!(
+        OpusCodec::profile_samplerate(CodecProfile::OpusAudioLow).unwrap(),
+        12_000
+    );
+    assert_eq!(
+        OpusCodec::profile_bitrate_ceiling(CodecProfile::OpusAudioMax).unwrap(),
+        128_000
+    );
+    assert_eq!(OpusCodec::max_bytes_per_frame(8_000, 60.0), 60);
+    assert_eq!(OpusCodec::max_bytes_per_frame(6_000, 2.5), 2);
+    assert!(OpusCodec::profile_channels(CodecProfile::Raw).is_err());
+}
+
+#[test]
 fn codec2_3200_round_trips_one_frame_with_python_header() {
     let samples: Vec<f32> = (0..160)
         .map(|n| ((n as f32 / 8_000.0) * 180.0 * std::f32::consts::TAU).sin() * 0.2)
