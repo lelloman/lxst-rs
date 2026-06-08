@@ -243,50 +243,127 @@ impl AudioFilter for BandPass {
 
 #[derive(Debug, Clone)]
 pub struct Agc {
+    trigger_level: f32,
     target_linear: f32,
     max_gain_linear: f32,
+    attack_time: f32,
+    release_time: f32,
+    hold_time: f32,
+    samplerate: Option<u32>,
+    attack_coeff: f32,
+    release_coeff: f32,
+    hold_samples: usize,
+    hold_counter: usize,
+    block_target_seconds: f32,
     current_gain: Vec<f32>,
 }
 
 impl Agc {
     pub fn new(target_level_db: f32, max_gain_db: f32) -> Self {
+        Self::with_timing(target_level_db, max_gain_db, 0.0001, 0.002, 0.001)
+    }
+
+    pub fn with_timing(
+        target_level_db: f32,
+        max_gain_db: f32,
+        attack_time: f32,
+        release_time: f32,
+        hold_time: f32,
+    ) -> Self {
         Self {
+            trigger_level: 0.003,
             target_linear: 10.0_f32.powf(target_level_db / 10.0),
             max_gain_linear: 10.0_f32.powf(max_gain_db / 10.0),
+            attack_time,
+            release_time,
+            hold_time,
+            samplerate: None,
+            attack_coeff: 0.1,
+            release_coeff: 0.01,
+            hold_samples: 1000,
+            hold_counter: 0,
+            block_target_seconds: 0.01,
             current_gain: Vec::new(),
+        }
+    }
+
+    fn configure(&mut self, samplerate: u32, channels: u8) {
+        if self.samplerate != Some(samplerate) {
+            self.samplerate = Some(samplerate);
+            self.attack_coeff = 1.0 - (-1.0 / (self.attack_time * samplerate as f32)).exp();
+            self.release_coeff = 1.0 - (-1.0 / (self.release_time * samplerate as f32)).exp();
+            self.hold_samples = (self.hold_time * samplerate as f32) as usize;
+        }
+        if self.current_gain.len() != channels as usize {
+            self.current_gain = vec![1.0; channels as usize];
+            self.hold_counter = 0;
         }
     }
 }
 
 impl AudioFilter for Agc {
     fn process(&mut self, frame: AudioFrame) -> AudioFrame {
+        if frame.samples.is_empty() {
+            return frame;
+        }
+        self.configure(frame.samplerate, frame.channels);
+
         let channels = frame.channels as usize;
-        if self.current_gain.len() != channels {
-            self.current_gain = vec![1.0; channels];
-        }
-        let mut rms = vec![0.0_f32; channels];
-        let frames = frame.frame_count().max(1) as f32;
-        for chunk in frame.samples.chunks(channels) {
-            for (channel, sample) in chunk.iter().enumerate() {
-                rms[channel] += sample * sample;
-            }
-        }
-        for value in &mut rms {
-            *value = (*value / frames).sqrt();
-        }
+        let frames = frame.frame_count();
+        let block_target = ((frames as f32 / frame.samplerate as f32) / self.block_target_seconds)
+            .floor() as usize;
+        let block_size = (frames / block_target.max(1)).max(1);
         let mut samples = frame.samples.clone();
-        for chunk in samples.chunks_mut(channels) {
-            for (channel, sample) in chunk.iter_mut().enumerate() {
-                let target_gain = if rms[channel] > 1e-9 {
-                    (self.target_linear / rms[channel]).min(self.max_gain_linear)
+
+        for block_start in (0..frames).step_by(block_size) {
+            let block_end = (block_start + block_size).min(frames);
+            let block_samples = block_end - block_start;
+
+            for channel in 0..channels {
+                let mut sum_squares = 0.0_f32;
+                for frame_index in block_start..block_end {
+                    let sample = samples[frame_index * channels + channel];
+                    sum_squares += sample * sample;
+                }
+                let rms = (sum_squares / block_samples as f32).sqrt();
+                let target_gain = if rms > 1e-9 && rms > self.trigger_level {
+                    (self.target_linear / rms).min(self.max_gain_linear)
                 } else {
-                    1.0
+                    self.current_gain[channel]
                 };
-                self.current_gain[channel] = 0.2 * target_gain + 0.8 * self.current_gain[channel];
-                *sample *= self.current_gain[channel];
+
+                if target_gain < self.current_gain[channel] {
+                    self.current_gain[channel] = self.attack_coeff * target_gain
+                        + (1.0 - self.attack_coeff) * self.current_gain[channel];
+                    self.hold_counter = self.hold_samples;
+                } else if self.hold_counter > 0 {
+                    self.hold_counter = self.hold_counter.saturating_sub(block_samples);
+                } else {
+                    self.current_gain[channel] = self.release_coeff * target_gain
+                        + (1.0 - self.release_coeff) * self.current_gain[channel];
+                }
+
+                for frame_index in block_start..block_end {
+                    samples[frame_index * channels + channel] *= self.current_gain[channel];
+                }
             }
         }
-        AudioFrame { samples, ..frame }.clipped()
+
+        const PEAK_LIMIT: f32 = 0.75;
+        for channel in 0..channels {
+            let mut peak = 0.0_f32;
+            for frame_index in 0..frames {
+                peak = peak.max(samples[frame_index * channels + channel].abs());
+            }
+            if peak > PEAK_LIMIT {
+                let scale = PEAK_LIMIT / peak;
+                for frame_index in 0..frames {
+                    samples[frame_index * channels + channel] *= scale;
+                }
+            }
+        }
+
+        AudioFrame { samples, ..frame }
     }
 }
 

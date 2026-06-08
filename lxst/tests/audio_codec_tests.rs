@@ -192,7 +192,34 @@ fn agc_keeps_output_bounded() {
     assert!(processed
         .samples()
         .iter()
-        .all(|sample| (-1.0..=1.0).contains(sample)));
+        .all(|sample| (-0.75..=0.75).contains(sample)));
+}
+
+#[test]
+fn agc_does_not_raise_below_trigger_noise() {
+    let frame = AudioFrame::new(8_000, 1, vec![0.001; 128]).unwrap();
+    let mut agc = Agc::new(-12.0, 12.0);
+    let processed = agc.process(frame);
+
+    assert!(processed
+        .samples()
+        .iter()
+        .all(|sample| (*sample - 0.001).abs() < f32::EPSILON));
+}
+
+#[test]
+fn agc_limits_per_channel_peaks() {
+    let samples: Vec<f32> = (0..128).flat_map(|_| [1.0, 0.25]).collect();
+    let frame = AudioFrame::new(8_000, 2, samples).unwrap();
+    let mut agc = Agc::new(20.0, 20.0);
+    let processed = agc.process(frame);
+
+    let mut peaks = [0.0_f32; 2];
+    for sample in processed.samples().chunks(2) {
+        peaks[0] = peaks[0].max(sample[0].abs());
+        peaks[1] = peaks[1].max(sample[1].abs());
+    }
+    assert!(peaks.iter().all(|peak| *peak <= 0.75));
 }
 
 #[test]
