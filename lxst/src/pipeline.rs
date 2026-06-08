@@ -1,4 +1,10 @@
 use std::collections::VecDeque;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use lxst_core::CodecKind;
 
@@ -77,6 +83,72 @@ impl Pipeline {
         };
         self.sink.handle_frame(encoded)?;
         Ok(true)
+    }
+}
+
+pub struct PipelineRunner {
+    stop_requested: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    worker: Option<JoinHandle<Result<(), PipelineError>>>,
+}
+
+impl PipelineRunner {
+    pub fn start(mut pipeline: Pipeline, poll_interval: Duration) -> Self {
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let running = Arc::new(AtomicBool::new(true));
+        let worker_stop = Arc::clone(&stop_requested);
+        let worker_running = Arc::clone(&running);
+
+        let worker = thread::spawn(move || {
+            pipeline.start();
+
+            let result = loop {
+                if worker_stop.load(Ordering::SeqCst) {
+                    break Ok(());
+                }
+
+                match pipeline.process_next() {
+                    Ok(true) => {}
+                    Ok(false) => thread::sleep(poll_interval),
+                    Err(error) => break Err(error),
+                }
+            };
+
+            pipeline.stop();
+            worker_running.store(false, Ordering::SeqCst);
+            result
+        });
+
+        Self {
+            stop_requested,
+            running,
+            worker: Some(worker),
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    pub fn stop(&mut self) -> Result<(), PipelineError> {
+        self.stop_requested.store(true, Ordering::SeqCst);
+        let Some(worker) = self.worker.take() else {
+            return Ok(());
+        };
+
+        let result = worker.join();
+        self.running.store(false, Ordering::SeqCst);
+
+        match result {
+            Ok(result) => result,
+            Err(_) => Err(PipelineError::WorkerPanic),
+        }
+    }
+}
+
+impl Drop for PipelineRunner {
+    fn drop(&mut self) {
+        let _ = self.stop();
     }
 }
 
@@ -189,6 +261,8 @@ pub enum PipelineError {
     IncompatibleSourceFrame,
     #[error("sink buffer is full")]
     SinkFull,
+    #[error("pipeline worker thread panicked")]
+    WorkerPanic,
     #[error(transparent)]
     Network(#[from] NetworkError),
 }

@@ -27,7 +27,7 @@ pub use network::{
 };
 pub use pipeline::{
     AudioSink, AudioSource, BufferedSink, BufferedSource, EncodedAudioFrame, Pipeline,
-    PipelineError,
+    PipelineError, PipelineRunner,
 };
 
 pub use lxst_core::{
