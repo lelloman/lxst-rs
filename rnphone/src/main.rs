@@ -3,12 +3,19 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
-use lxst::network::TelephonyEndpoint;
-use lxst::{CallState, Telephone, TelephoneConfig};
+use lxst::network::{
+    create_telephony_link, recall_telephony_identity, request_path_until, telephony_dest_hash,
+    TelephonyEndpoint,
+};
+use lxst::{CallState, LxstPacket, Telephone, TelephoneConfig, TelephonyNetworkEvent};
 use rns_crypto::identity::Identity;
 use rns_crypto::OsRng;
 use rns_net::storage::{load_identity, save_identity};
+use rns_net::RnsNode;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -39,7 +46,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     }
 
     let config_dir = args.config.unwrap_or_else(default_config_dir);
-    let mut app = App::load(config_dir, args.service)?;
+    let mut app = App::load(config_dir, args.rnsconfig, args.service)?;
     app.start()
 }
 
@@ -119,14 +126,23 @@ impl Args {
 
 struct App {
     config_dir: PathBuf,
+    rnsconfig: Option<PathBuf>,
     config: RnphoneConfig,
     identity: Identity,
     telephone: Telephone,
     service: bool,
+    node: Option<RnsNode>,
+    network_events: Option<mpsc::Receiver<TelephonyNetworkEvent>>,
+    active_link: Option<[u8; 16]>,
+    last_dialed: Option<[u8; 16]>,
 }
 
 impl App {
-    fn load(config_dir: PathBuf, service: bool) -> Result<Self, String> {
+    fn load(
+        config_dir: PathBuf,
+        rnsconfig: Option<PathBuf>,
+        service: bool,
+    ) -> Result<Self, String> {
         fs::create_dir_all(config_dir.join("storage")).map_err(|e| e.to_string())?;
         let config_path = config_dir.join("config");
         if !config_path.exists() {
@@ -152,10 +168,15 @@ impl App {
 
         Ok(Self {
             config_dir,
+            rnsconfig,
             config,
             identity,
             telephone,
             service,
+            node: None,
+            network_events: None,
+            active_link: None,
+            last_dialed: None,
         })
     }
 
@@ -167,8 +188,14 @@ impl App {
         println!("  Config: {}", self.config_dir.display());
 
         if self.service {
-            println!("Service mode ready; live RNS/audio loop is not wired in this milestone");
-            return Ok(());
+            self.ensure_network(&endpoint)?;
+            self.announce(&endpoint)?;
+            println!("Service mode running");
+            loop {
+                self.poll_network_events();
+                self.telephone.tick();
+                thread::sleep(Duration::from_millis(100));
+            }
         }
 
         println!("Enter an identity hash to stage a call, or ? for help");
@@ -183,11 +210,11 @@ impl App {
             let line = line.trim();
             if line.is_empty() {
                 if self.telephone.state() != CallState::Available {
-                    self.telephone.hangup();
-                    println!("Call ended");
+                    self.hangup_current();
                 }
                 continue;
             }
+            self.poll_network_events();
             match line {
                 "?" | "h" | "help" => print_help_menu(),
                 "q" | "quit" | "exit" => break,
@@ -196,24 +223,171 @@ impl App {
                     println!("Destination hash: {}", hex(&endpoint.destination.hash.0))
                 }
                 "p" | "phonebook" => self.print_phonebook(),
-                "a" | "announce" => println!("Announce requires live RNS node integration"),
-                "r" | "redial" => println!("Redial requires a completed call target"),
+                "a" | "announce" => self.announce(&endpoint)?,
+                "r" | "redial" => match self.last_dialed {
+                    Some(hash) => self.dial_hash(&endpoint, hash)?,
+                    None => println!("Redial requires a completed call target"),
+                },
+                "answer" => {
+                    if self.telephone.answer() {
+                        let _ = self.telephone.establish();
+                        println!("Call answered");
+                    } else {
+                        println!("No incoming call to answer");
+                    }
+                }
+                "hangup" => self.hangup_current(),
                 value if value.len() == 32 && value.chars().all(|c| c.is_ascii_hexdigit()) => {
                     let mut hash = [0u8; 16];
                     decode_hex_into(value, &mut hash)?;
-                    if self.telephone.begin_outgoing_call(hash) {
-                        println!(
-                            "Staged outgoing call to {}; live RNS/audio loop is not wired yet",
-                            value
-                        );
-                    } else {
-                        println!("Telephone is busy");
-                    }
+                    self.dial_hash(&endpoint, hash)?;
                 }
                 other => println!("Unknown command: {other}"),
             }
+            self.telephone.tick();
         }
         Ok(())
+    }
+
+    fn ensure_network(&mut self, endpoint: &TelephonyEndpoint) -> Result<(), String> {
+        if self.node.is_some() {
+            return Ok(());
+        }
+        let (callbacks, events) = lxst::telephony_callback_channel();
+        let node = RnsNode::from_config(self.rnsconfig.as_deref(), callbacks)
+            .map_err(|e| e.to_string())?;
+        endpoint
+            .register(&node, &self.identity)
+            .map_err(|e| e.to_string())?;
+        self.network_events = Some(events);
+        self.node = Some(node);
+        Ok(())
+    }
+
+    fn announce(&mut self, endpoint: &TelephonyEndpoint) -> Result<(), String> {
+        self.ensure_network(endpoint)?;
+        endpoint
+            .announce(
+                self.node.as_ref().expect("node is initialized"),
+                &self.identity,
+            )
+            .map_err(|e| e.to_string())?;
+        println!("Announced {}", hex(&endpoint.destination.hash.0));
+        Ok(())
+    }
+
+    fn dial_hash(
+        &mut self,
+        endpoint: &TelephonyEndpoint,
+        identity_hash: [u8; 16],
+    ) -> Result<(), String> {
+        if self.telephone.is_busy() {
+            println!("Telephone is busy");
+            return Ok(());
+        }
+
+        self.ensure_network(endpoint)?;
+        let node = self.node.as_ref().expect("node is initialized");
+        let dest_hash = telephony_dest_hash(identity_hash);
+        println!("Requesting path to {}", hex(&dest_hash.0));
+        if !request_path_until(
+            node,
+            dest_hash,
+            Duration::from_secs(10),
+            Duration::from_millis(250),
+        )
+        .map_err(|e| e.to_string())?
+        {
+            return Err(format!("no path to {}", hex(&dest_hash.0)));
+        }
+
+        let announced = recall_telephony_identity(node, identity_hash)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no recalled identity for {}", hex(&identity_hash)))?;
+        let link_id = create_telephony_link(node, &announced).map_err(|e| e.to_string())?;
+        if self.telephone.begin_outgoing_call(identity_hash) {
+            self.active_link = Some(link_id);
+            self.last_dialed = Some(identity_hash);
+            println!("Dialing {} on link {}", hex(&identity_hash), hex(&link_id));
+        } else {
+            let _ = node.teardown_link(link_id);
+            println!("Telephone is busy");
+        }
+        Ok(())
+    }
+
+    fn hangup_current(&mut self) {
+        if let (Some(node), Some(link_id)) = (self.node.as_ref(), self.active_link.take()) {
+            let _ = node.teardown_link(link_id);
+        }
+        self.telephone.hangup();
+        println!("Call ended");
+    }
+
+    fn poll_network_events(&mut self) {
+        let Some(events) = self.network_events.take() else {
+            return;
+        };
+        while let Ok(event) = events.try_recv() {
+            self.handle_network_event(event);
+        }
+        self.network_events = Some(events);
+    }
+
+    fn handle_network_event(&mut self, event: TelephonyNetworkEvent) {
+        match event {
+            TelephonyNetworkEvent::Announce(announced) => {
+                println!("Heard {}", announced.identity_hash);
+            }
+            TelephonyNetworkEvent::PathUpdated { dest_hash, hops } => {
+                println!("Path to {dest_hash} is {hops} hop(s)");
+            }
+            TelephonyNetworkEvent::LocalDelivery { .. } => {}
+            TelephonyNetworkEvent::LinkEstablished {
+                link_id,
+                dest_hash,
+                is_initiator,
+                ..
+            } => {
+                self.active_link = Some(link_id.0);
+                if is_initiator {
+                    let _ = self.telephone.establish();
+                    println!("Link {link_id} established to {dest_hash}");
+                } else {
+                    println!("Incoming link {link_id} from {dest_hash}");
+                }
+            }
+            TelephonyNetworkEvent::LinkClosed { link_id, .. } => {
+                if self.active_link == Some(link_id.0) {
+                    self.active_link = None;
+                    if self.telephone.state() != CallState::Available {
+                        self.telephone.hangup();
+                    }
+                    println!("Link {link_id} closed");
+                }
+            }
+            TelephonyNetworkEvent::RemoteIdentified {
+                identity_hash,
+                link_id,
+                ..
+            } => {
+                if self.telephone.state() == CallState::Available {
+                    if self.telephone.begin_incoming_call(identity_hash.0) {
+                        self.active_link = Some(link_id.0);
+                        println!("Incoming call from {identity_hash}");
+                    } else {
+                        println!("Rejected incoming call from {identity_hash}");
+                    }
+                }
+            }
+            TelephonyNetworkEvent::LinkData { data, .. } => {
+                if let Ok(packet) = LxstPacket::decode(&data) {
+                    for signal in packet.signals {
+                        self.telephone.apply_signal(signal);
+                    }
+                }
+            }
+        }
     }
 
     fn print_phonebook(&self) {
