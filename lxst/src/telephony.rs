@@ -4,6 +4,8 @@ use std::time::{Duration, Instant};
 
 use lxst_core::{CallProfile, Signal, SignalCode};
 
+use crate::audio::{list_audio_devices, AudioDeviceInfo, AudioDeviceKind, AudioError};
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TelephoneConfig {
     pub ring_time: Duration,
@@ -17,6 +19,7 @@ pub struct TelephoneConfig {
     pub transmit_gain_db: f32,
     pub use_agc: bool,
     pub auto_answer_after: Option<Duration>,
+    pub busy_tone_duration: Duration,
 }
 
 impl Default for TelephoneConfig {
@@ -33,6 +36,7 @@ impl Default for TelephoneConfig {
             transmit_gain_db: 0.0,
             use_agc: true,
             auto_answer_after: None,
+            busy_tone_duration: Duration::from_millis(4_250),
         }
     }
 }
@@ -113,6 +117,32 @@ pub struct Telephone {
 }
 
 impl Telephone {
+    pub fn available_outputs() -> Result<Vec<AudioDeviceInfo>, AudioError> {
+        Ok(list_audio_devices()?
+            .into_iter()
+            .filter(|device| device.kind == AudioDeviceKind::Output)
+            .collect())
+    }
+
+    pub fn available_inputs() -> Result<Vec<AudioDeviceInfo>, AudioError> {
+        Ok(list_audio_devices()?
+            .into_iter()
+            .filter(|device| device.kind == AudioDeviceKind::Input)
+            .collect())
+    }
+
+    pub fn default_output() -> Result<Option<AudioDeviceInfo>, AudioError> {
+        Ok(Self::available_outputs()?
+            .into_iter()
+            .find(|device| device.is_default))
+    }
+
+    pub fn default_input() -> Result<Option<AudioDeviceInfo>, AudioError> {
+        Ok(Self::available_inputs()?
+            .into_iter()
+            .find(|device| device.is_default))
+    }
+
     pub fn new(config: TelephoneConfig) -> (Self, mpsc::Receiver<CallEvent>) {
         let (events, rx) = mpsc::channel();
         let active_profile = config.profile;
@@ -219,6 +249,14 @@ impl Telephone {
 
     pub fn set_connect_timeout(&mut self, timeout: Duration) {
         self.config.connect_time = timeout;
+    }
+
+    pub fn busy_tone_duration(&self) -> Duration {
+        self.config.busy_tone_duration
+    }
+
+    pub fn set_busy_tone_duration(&mut self, duration: Duration) {
+        self.config.busy_tone_duration = duration;
     }
 
     pub fn set_low_latency_output(&mut self, enabled: bool) {

@@ -1,8 +1,8 @@
 use lxst::audio::AudioFilter;
 use lxst::{
-    Agc, AudioCodec, AudioFrame, CallProfile, CallState, CallerPolicy, Codec2Codec, CodecError,
-    Mixer, OpusCodec, RawBitDepth, RawCodec, Signal, SignalCode, Telephone, TelephoneConfig,
-    ToneSource,
+    Agc, AudioCodec, AudioDeviceKind, AudioFrame, CallProfile, CallState, CallerPolicy,
+    Codec2Codec, CodecError, Mixer, OpusCodec, RawBitDepth, RawCodec, Signal, SignalCode,
+    Telephone, TelephoneConfig, ToneSource,
 };
 use lxst_core::CodecProfile;
 use std::time::Duration;
@@ -296,6 +296,7 @@ fn telephone_updates_audio_control_settings() {
     telephone.mute_receive(true);
     telephone.mute_transmit(true);
     telephone.set_connect_timeout(Duration::from_secs(2));
+    telephone.set_busy_tone_duration(Duration::ZERO);
 
     assert_eq!(telephone.receive_gain_db(), 3.0);
     assert_eq!(telephone.transmit_gain_db(), -2.5);
@@ -303,6 +304,7 @@ fn telephone_updates_audio_control_settings() {
     assert!(telephone.receive_muted());
     assert!(telephone.transmit_muted());
     assert_eq!(telephone.config().connect_time, Duration::from_secs(2));
+    assert_eq!(telephone.busy_tone_duration(), Duration::ZERO);
 
     let events: Vec<_> = rx.try_iter().collect();
     assert!(events.contains(&lxst::telephony::CallEvent::ReceiveGainChanged(3.0)));
@@ -310,6 +312,25 @@ fn telephone_updates_audio_control_settings() {
     assert!(events.contains(&lxst::telephony::CallEvent::AgcChanged(false)));
     assert!(events.contains(&lxst::telephony::CallEvent::ReceiveMutedChanged(true)));
     assert!(events.contains(&lxst::telephony::CallEvent::TransmitMutedChanged(true)));
+}
+
+#[test]
+fn telephone_device_helpers_filter_audio_devices() {
+    match Telephone::available_outputs() {
+        Ok(outputs) => assert!(outputs
+            .iter()
+            .all(|device| device.kind == AudioDeviceKind::Output)),
+        Err(err) => assert!(!err.to_string().is_empty()),
+    }
+    match Telephone::available_inputs() {
+        Ok(inputs) => assert!(inputs
+            .iter()
+            .all(|device| device.kind == AudioDeviceKind::Input)),
+        Err(err) => assert!(!err.to_string().is_empty()),
+    }
+
+    let _ = Telephone::default_output();
+    let _ = Telephone::default_input();
 }
 
 #[test]
