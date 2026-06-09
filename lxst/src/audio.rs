@@ -128,6 +128,14 @@ pub trait AudioFilter: Send {
 }
 
 pub trait LinePlayback: Send + 'static {
+    fn start(&mut self) -> Result<(), AudioError> {
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), AudioError> {
+        Ok(())
+    }
+
     fn play(&mut self, frame: AudioFrame) -> Result<(), AudioError>;
 
     fn enable_low_latency(&mut self) -> Result<bool, AudioError> {
@@ -293,6 +301,7 @@ where
                 "queued line sink backend is unavailable".to_string(),
             ));
         };
+        backend.start()?;
         self.should_run.store(true, Ordering::SeqCst);
         if self.config.low_latency {
             self.wants_low_latency.store(true, Ordering::SeqCst);
@@ -365,6 +374,7 @@ where
                     stats.low_latency_enabled = true;
                 }
             }
+            backend.stop()?;
             Ok(backend)
         }));
         Ok(())
@@ -927,7 +937,7 @@ impl Default for CpalOutputConfig {
     fn default() -> Self {
         Self {
             preferred_device: None,
-            max_queued_frames: 64,
+            max_queued_frames: 6,
             low_latency: false,
         }
     }
@@ -936,10 +946,7 @@ impl Default for CpalOutputConfig {
 pub struct CpalOutputSink {
     samplerate: u32,
     channels: u8,
-    max_queued_frames: usize,
-    stream: cpal::Stream,
-    queue: Arc<Mutex<VecDeque<AudioFrame>>>,
-    running: bool,
+    sink: QueuedLineSink<CpalPlaybackBackend>,
 }
 
 impl CpalOutputSink {
@@ -955,51 +962,39 @@ impl CpalOutputSink {
         if config.low_latency {
             stream_config.buffer_size = cpal::BufferSize::Fixed(128);
         }
-        let queue = Arc::new(Mutex::new(VecDeque::with_capacity(
+        let backend = CpalPlaybackBackend::new(
+            &device,
+            supported_config.sample_format(),
+            &stream_config,
             config.max_queued_frames.max(1),
-        )));
-        let stream = match supported_config.sample_format() {
-            cpal::SampleFormat::F32 => {
-                build_output_stream::<f32>(&device, &stream_config, queue.clone())?
-            }
-            cpal::SampleFormat::I16 => {
-                build_output_stream::<i16>(&device, &stream_config, queue.clone())?
-            }
-            cpal::SampleFormat::U16 => {
-                build_output_stream::<u16>(&device, &stream_config, queue.clone())?
-            }
-            other => {
-                return Err(AudioError::UnsupportedDeviceFormat(other.to_string()));
-            }
-        };
+        )?;
+        let sink = QueuedLineSink::new(
+            backend,
+            QueuedLineSinkConfig {
+                samplerate,
+                channels,
+                max_frames: config.max_queued_frames.max(1),
+                low_latency: false,
+                ..QueuedLineSinkConfig::default()
+            },
+        )?;
         Ok(Self {
             samplerate,
             channels,
-            max_queued_frames: config.max_queued_frames.max(1),
-            stream,
-            queue,
-            running: false,
+            sink,
         })
     }
 
     pub fn start(&mut self) -> Result<(), AudioError> {
-        self.stream
-            .play()
-            .map_err(|err| AudioError::Stream(err.to_string()))?;
-        self.running = true;
-        Ok(())
+        self.sink.start()
     }
 
     pub fn stop(&mut self) -> Result<(), AudioError> {
-        self.stream
-            .pause()
-            .map_err(|err| AudioError::Stream(err.to_string()))?;
-        self.running = false;
-        Ok(())
+        self.sink.stop()
     }
 
     pub fn is_running(&self) -> bool {
-        self.running
+        self.sink.is_running()
     }
 
     pub fn samplerate(&self) -> u32 {
@@ -1011,27 +1006,72 @@ impl CpalOutputSink {
     }
 
     pub fn can_receive(&self) -> bool {
-        self.queue
-            .lock()
-            .map(|queue| queue.len() < self.max_queued_frames)
-            .unwrap_or(false)
+        self.sink.can_receive()
     }
 
     pub fn queued_frames(&self) -> usize {
-        self.queue.lock().map(|queue| queue.len()).unwrap_or(0)
+        self.sink.queued_frames()
     }
 
     pub fn handle_frame(&mut self, frame: AudioFrame) -> Result<(), AudioError> {
-        let frame = frame
-            .with_channels(self.channels)?
-            .resampled(self.samplerate)?
-            .clipped();
+        self.sink.handle_frame(frame)
+    }
+}
+
+struct CpalPlaybackBackend {
+    stream: cpal::Stream,
+    queue: Arc<Mutex<VecDeque<AudioFrame>>>,
+    max_queued_frames: usize,
+}
+
+impl CpalPlaybackBackend {
+    fn new(
+        device: &cpal::Device,
+        sample_format: cpal::SampleFormat,
+        stream_config: &cpal::StreamConfig,
+        max_queued_frames: usize,
+    ) -> Result<Self, AudioError> {
+        let queue = Arc::new(Mutex::new(VecDeque::with_capacity(max_queued_frames)));
+        let stream = match sample_format {
+            cpal::SampleFormat::F32 => {
+                build_output_stream::<f32>(device, stream_config, queue.clone())?
+            }
+            cpal::SampleFormat::I16 => {
+                build_output_stream::<i16>(device, stream_config, queue.clone())?
+            }
+            cpal::SampleFormat::U16 => {
+                build_output_stream::<u16>(device, stream_config, queue.clone())?
+            }
+            other => return Err(AudioError::UnsupportedDeviceFormat(other.to_string())),
+        };
+        Ok(Self {
+            stream,
+            queue,
+            max_queued_frames,
+        })
+    }
+}
+
+impl LinePlayback for CpalPlaybackBackend {
+    fn start(&mut self) -> Result<(), AudioError> {
+        self.stream
+            .play()
+            .map_err(|err| AudioError::Stream(err.to_string()))
+    }
+
+    fn stop(&mut self) -> Result<(), AudioError> {
+        self.stream
+            .pause()
+            .map_err(|err| AudioError::Stream(err.to_string()))
+    }
+
+    fn play(&mut self, frame: AudioFrame) -> Result<(), AudioError> {
         let mut queue = self
             .queue
             .lock()
             .map_err(|err| AudioError::Stream(err.to_string()))?;
         if queue.len() >= self.max_queued_frames {
-            return Err(AudioError::Stream("audio output queue is full".to_string()));
+            queue.pop_front();
         }
         queue.push_back(frame);
         Ok(())
