@@ -1,9 +1,9 @@
 use lxst::audio::AudioFilter;
 use lxst::{
-    Agc, AudioCodec, AudioDeviceKind, AudioFrame, AudioSource, CallProfile, CallState,
-    CallerPolicy, Codec2Codec, CodecError, LinePlayback, Mixer, OpusCodec, QueuedLineSink,
-    QueuedLineSinkConfig, RawBitDepth, RawCodec, Signal, SignalCode, Telephone, TelephoneConfig,
-    ToneSource,
+    plan_line_source_frame, Agc, AudioCodec, AudioDeviceKind, AudioFrame, AudioSource, CallProfile,
+    CallState, CallerPolicy, Codec2Codec, CodecError, LinePlayback, Mixer, OpusCodec,
+    QueuedLineSink, QueuedLineSinkConfig, RawBitDepth, RawCodec, Signal, SignalCode, Telephone,
+    TelephoneConfig, ToneSource,
 };
 use lxst_core::CodecProfile;
 use std::sync::{
@@ -228,6 +228,43 @@ fn mixer_tightening_source_limit_drops_oldest_frames() {
 
     assert_eq!(mixer.mix_next().unwrap().unwrap().samples(), &[0.6]);
     assert!(mixer.mix_next().unwrap().is_none());
+}
+
+#[test]
+fn line_source_frame_plan_clamps_opus_to_valid_maximum() {
+    let plan = plan_line_source_frame(80.0, Some(CodecProfile::OpusVoiceLow), 48_000, 1).unwrap();
+
+    assert_eq!(plan.requested_frame_ms, 80.0);
+    assert_eq!(plan.target_frame_ms, 60.0);
+    assert_eq!(plan.frame_count, 2_880);
+    assert_eq!(plan.sample_count, 2_880);
+}
+
+#[test]
+fn line_source_frame_plan_matches_python_opus_quantize_then_nearest_valid() {
+    let plan = plan_line_source_frame(7.0, Some(CodecProfile::OpusVoiceLow), 8_000, 1).unwrap();
+
+    assert_eq!(plan.target_frame_ms, 5.0);
+    assert_eq!(plan.frame_count, 40);
+    assert_eq!(plan.sample_count, 40);
+}
+
+#[test]
+fn line_source_frame_plan_quantizes_codec2_to_40ms_blocks() {
+    let plan = plan_line_source_frame(45.0, Some(CodecProfile::Codec2_3200), 8_000, 1).unwrap();
+
+    assert_eq!(plan.target_frame_ms, 80.0);
+    assert_eq!(plan.frame_count, 640);
+    assert_eq!(plan.sample_count, 640);
+}
+
+#[test]
+fn line_source_frame_plan_leaves_unconstrained_profiles_unchanged() {
+    let plan = plan_line_source_frame(80.0, Some(CodecProfile::Raw), 48_000, 2).unwrap();
+
+    assert_eq!(plan.target_frame_ms, 80.0);
+    assert_eq!(plan.frame_count, 3_840);
+    assert_eq!(plan.sample_count, 7_680);
 }
 
 #[test]

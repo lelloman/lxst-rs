@@ -8,6 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use lxst_core::CodecProfile;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioFrame {
@@ -404,6 +405,103 @@ where
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LineSourceFramePlan {
+    pub requested_frame_ms: f32,
+    pub target_frame_ms: f32,
+    pub samplerate: u32,
+    pub channels: u8,
+    pub frame_count: usize,
+    pub sample_count: usize,
+}
+
+pub fn plan_line_source_frame(
+    requested_frame_ms: f32,
+    codec_profile: Option<CodecProfile>,
+    samplerate: u32,
+    channels: u8,
+) -> Result<LineSourceFramePlan, AudioError> {
+    AudioFrame::silence(samplerate, channels, 0)?;
+    let mut target_frame_ms = requested_frame_ms.max(1.0);
+
+    if let Some(timing) = codec_profile.and_then(codec_timing) {
+        if let Some(quanta) = timing.frame_quanta_ms {
+            let remainder = target_frame_ms % quanta;
+            if remainder.abs() > f32::EPSILON {
+                target_frame_ms = (target_frame_ms / quanta).ceil() * quanta;
+            }
+        }
+        if let Some(maximum) = timing.frame_max_ms {
+            if target_frame_ms > maximum {
+                target_frame_ms = maximum;
+            }
+        }
+        if let Some(valid) = timing.valid_frame_ms {
+            if !valid
+                .iter()
+                .any(|duration| (*duration - target_frame_ms).abs() < f32::EPSILON)
+            {
+                target_frame_ms = valid
+                    .iter()
+                    .copied()
+                    .min_by(|left, right| {
+                        let left_delta = (*left - target_frame_ms).abs();
+                        let right_delta = (*right - target_frame_ms).abs();
+                        left_delta
+                            .partial_cmp(&right_delta)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .unwrap_or(target_frame_ms);
+            }
+        }
+    }
+
+    let frame_count = ((samplerate as f32 * target_frame_ms) / 1000.0).ceil() as usize;
+    let sample_count = frame_count * channels as usize;
+    Ok(LineSourceFramePlan {
+        requested_frame_ms,
+        target_frame_ms,
+        samplerate,
+        channels,
+        frame_count,
+        sample_count,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CodecTiming {
+    frame_quanta_ms: Option<f32>,
+    frame_max_ms: Option<f32>,
+    valid_frame_ms: Option<&'static [f32]>,
+}
+
+fn codec_timing(profile: CodecProfile) -> Option<CodecTiming> {
+    match profile {
+        CodecProfile::OpusVoiceLow
+        | CodecProfile::OpusVoiceMedium
+        | CodecProfile::OpusVoiceHigh
+        | CodecProfile::OpusVoiceMax
+        | CodecProfile::OpusAudioMin
+        | CodecProfile::OpusAudioLow
+        | CodecProfile::OpusAudioMedium
+        | CodecProfile::OpusAudioHigh
+        | CodecProfile::OpusAudioMax => Some(CodecTiming {
+            frame_quanta_ms: Some(2.5),
+            frame_max_ms: Some(60.0),
+            valid_frame_ms: Some(&[2.5, 5.0, 10.0, 20.0, 40.0, 60.0]),
+        }),
+        CodecProfile::Codec2_700C | CodecProfile::Codec2_1600 | CodecProfile::Codec2_3200 => {
+            Some(CodecTiming {
+                frame_quanta_ms: Some(40.0),
+                frame_max_ms: None,
+                valid_frame_ms: None,
+            })
+        }
+        CodecProfile::Raw => None,
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HighPass {
     cut: f32,
@@ -782,6 +880,7 @@ pub struct ToneSource {
 pub struct CpalInputConfig {
     pub preferred_device: Option<String>,
     pub target_frame_ms: u16,
+    pub codec_profile: Option<CodecProfile>,
     pub gain_db: f32,
     pub ease_in: Duration,
     pub skip: Duration,
@@ -793,6 +892,7 @@ impl Default for CpalInputConfig {
         Self {
             preferred_device: None,
             target_frame_ms: 80,
+            codec_profile: None,
             gain_db: 0.0,
             ease_in: Duration::ZERO,
             skip: Duration::ZERO,
@@ -824,7 +924,13 @@ impl CpalInputSource {
         let samplerate = supported_config.sample_rate();
         let channels = u8::try_from(supported_config.channels())
             .map_err(|_| AudioError::InvalidChannels(u8::MAX))?;
-        let samples_per_frame = samples_per_frame(samplerate, channels, config.target_frame_ms);
+        let frame_plan = plan_line_source_frame(
+            config.target_frame_ms as f32,
+            config.codec_profile,
+            samplerate,
+            channels,
+        )?;
+        let samples_per_frame = frame_plan.sample_count;
         let (tx, rx) = mpsc::sync_channel(config.max_queued_frames.max(1));
         let stream_config = supported_config.config();
         let stream = match supported_config.sample_format() {
@@ -1455,11 +1561,6 @@ impl CpalSampleFromF32 for u16 {
     fn from_f32_sample(sample: f32) -> Self {
         ((sample.clamp(-1.0, 1.0) * 32767.0) + 32768.0) as u16
     }
-}
-
-fn samples_per_frame(samplerate: u32, channels: u8, target_frame_ms: u16) -> usize {
-    let frames = ((samplerate as u64 * target_frame_ms.max(1) as u64).div_ceil(1000)) as usize;
-    frames * channels as usize
 }
 
 fn duration_samples(duration: Duration, samplerate: u32, channels: u8) -> usize {

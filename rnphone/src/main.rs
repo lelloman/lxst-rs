@@ -486,6 +486,7 @@ impl CallAudio {
 
         let mut input = CpalInputSource::new(CpalInputConfig {
             target_frame_ms: frame_ms,
+            codec_profile: Some(codec_profile),
             skip: Duration::from_millis(75),
             ease_in: Duration::from_millis(225),
             ..CpalInputConfig::default()
