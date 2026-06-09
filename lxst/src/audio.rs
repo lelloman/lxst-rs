@@ -1,7 +1,11 @@
 use std::collections::{HashMap, VecDeque};
 use std::f32::consts::PI;
-use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc, Condvar, Mutex,
+};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -121,6 +125,273 @@ pub enum AudioError {
 
 pub trait AudioFilter: Send {
     fn process(&mut self, frame: AudioFrame) -> AudioFrame;
+}
+
+pub trait LinePlayback: Send + 'static {
+    fn play(&mut self, frame: AudioFrame) -> Result<(), AudioError>;
+
+    fn enable_low_latency(&mut self) -> Result<bool, AudioError> {
+        Ok(false)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedLineSinkConfig {
+    pub samplerate: u32,
+    pub channels: u8,
+    pub max_frames: usize,
+    pub autostart_min: usize,
+    pub frame_timeout: usize,
+    pub autodigest: bool,
+    pub low_latency: bool,
+}
+
+impl Default for QueuedLineSinkConfig {
+    fn default() -> Self {
+        Self {
+            samplerate: 48_000,
+            channels: 1,
+            max_frames: 6,
+            autostart_min: 1,
+            frame_timeout: 8,
+            autodigest: true,
+            low_latency: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct QueuedLineSinkStats {
+    pub output_latency: Duration,
+    pub max_latency: Duration,
+    pub underrun_at: Option<Instant>,
+    pub low_latency_enabled: bool,
+}
+
+pub struct QueuedLineSink<P>
+where
+    P: LinePlayback,
+{
+    config: QueuedLineSinkConfig,
+    buffer_max_height: usize,
+    queue: Arc<(Mutex<VecDeque<AudioFrame>>, Condvar)>,
+    should_run: Arc<AtomicBool>,
+    wants_low_latency: Arc<AtomicBool>,
+    stats: Arc<Mutex<QueuedLineSinkStats>>,
+    backend: Option<P>,
+    worker: Option<JoinHandle<Result<P, AudioError>>>,
+    samples_per_frame: Option<usize>,
+    frame_time: Option<Duration>,
+}
+
+impl<P> QueuedLineSink<P>
+where
+    P: LinePlayback,
+{
+    pub fn new(backend: P, config: QueuedLineSinkConfig) -> Result<Self, AudioError> {
+        AudioFrame::silence(config.samplerate, config.channels, 0)?;
+        let max_frames = config.max_frames.max(1);
+        Ok(Self {
+            buffer_max_height: max_frames.saturating_sub(3).max(1),
+            config: QueuedLineSinkConfig {
+                max_frames,
+                autostart_min: config.autostart_min.max(1),
+                frame_timeout: config.frame_timeout.max(1),
+                ..config
+            },
+            queue: Arc::new((
+                Mutex::new(VecDeque::with_capacity(max_frames)),
+                Condvar::new(),
+            )),
+            should_run: Arc::new(AtomicBool::new(false)),
+            wants_low_latency: Arc::new(AtomicBool::new(false)),
+            stats: Arc::new(Mutex::new(QueuedLineSinkStats::default())),
+            backend: Some(backend),
+            worker: None,
+            samples_per_frame: None,
+            frame_time: None,
+        })
+    }
+
+    pub fn can_receive(&self) -> bool {
+        self.queue
+            .0
+            .lock()
+            .map(|queue| queue.len() < self.buffer_max_height)
+            .unwrap_or(false)
+    }
+
+    pub fn queued_frames(&self) -> usize {
+        self.queue
+            .0
+            .lock()
+            .map(|queue| queue.len())
+            .unwrap_or_default()
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.should_run.load(Ordering::SeqCst)
+    }
+
+    pub fn stats(&self) -> QueuedLineSinkStats {
+        self.stats.lock().map(|stats| *stats).unwrap_or_default()
+    }
+
+    pub fn samples_per_frame(&self) -> Option<usize> {
+        self.samples_per_frame
+    }
+
+    pub fn frame_time(&self) -> Option<Duration> {
+        self.frame_time
+    }
+
+    pub fn enable_low_latency(&self) {
+        self.wants_low_latency.store(true, Ordering::SeqCst);
+        self.queue.1.notify_all();
+    }
+
+    pub fn handle_frame(&mut self, frame: AudioFrame) -> Result<(), AudioError> {
+        let frame = frame
+            .with_channels(self.config.channels)?
+            .resampled(self.config.samplerate)?
+            .clipped();
+        if self.samples_per_frame.is_none() {
+            let frame_count = frame.frame_count();
+            self.samples_per_frame = Some(frame_count);
+            self.frame_time = Some(Duration::from_secs_f64(
+                frame_count as f64 / self.config.samplerate as f64,
+            ));
+        }
+
+        let should_start = {
+            let (lock, cvar) = &*self.queue;
+            let mut queue = lock
+                .lock()
+                .map_err(|err| AudioError::Stream(err.to_string()))?;
+            if queue.len() >= self.config.max_frames {
+                queue.pop_front();
+            }
+            queue.push_back(frame);
+            cvar.notify_one();
+            self.config.autodigest && queue.len() >= self.config.autostart_min && !self.is_running()
+        };
+
+        if should_start {
+            self.start()?;
+        }
+        Ok(())
+    }
+
+    pub fn start(&mut self) -> Result<(), AudioError> {
+        if self.worker.is_some() {
+            self.should_run.store(true, Ordering::SeqCst);
+            self.queue.1.notify_all();
+            return Ok(());
+        }
+        let Some(mut backend) = self.backend.take() else {
+            return Err(AudioError::Stream(
+                "queued line sink backend is unavailable".to_string(),
+            ));
+        };
+        self.should_run.store(true, Ordering::SeqCst);
+        if self.config.low_latency {
+            self.wants_low_latency.store(true, Ordering::SeqCst);
+        }
+
+        let queue = Arc::clone(&self.queue);
+        let should_run = Arc::clone(&self.should_run);
+        let wants_low_latency = Arc::clone(&self.wants_low_latency);
+        let stats = Arc::clone(&self.stats);
+        let buffer_max_height = self.buffer_max_height;
+        let frame_timeout = self.config.frame_timeout;
+        let frame_time = self.frame_time.unwrap_or(Duration::from_millis(20));
+
+        self.worker = Some(thread::spawn(move || {
+            loop {
+                let frame = {
+                    let (lock, cvar) = &*queue;
+                    let mut queue = lock
+                        .lock()
+                        .map_err(|err| AudioError::Stream(err.to_string()))?;
+                    if queue.is_empty() && should_run.load(Ordering::SeqCst) {
+                        let wait = frame_time.mul_f32(0.1).max(Duration::from_millis(1));
+                        let (guard, _) = cvar
+                            .wait_timeout(queue, wait)
+                            .map_err(|err| AudioError::Stream(err.to_string()))?;
+                        queue = guard;
+                    }
+                    queue.pop_front()
+                };
+
+                if let Some(frame) = frame {
+                    {
+                        let queued = queue.0.lock().map(|queue| queue.len()).unwrap_or_default();
+                        let mut stats = stats
+                            .lock()
+                            .map_err(|err| AudioError::Stream(err.to_string()))?;
+                        stats.output_latency = frame_time.saturating_mul(queued as u32);
+                        stats.max_latency = frame_time.saturating_mul(buffer_max_height as u32);
+                        stats.underrun_at = None;
+                    }
+                    backend.play(frame)?;
+                    let mut queue = queue
+                        .0
+                        .lock()
+                        .map_err(|err| AudioError::Stream(err.to_string()))?;
+                    if queue.len() > buffer_max_height {
+                        queue.pop_front();
+                    }
+                } else if should_run.load(Ordering::SeqCst) {
+                    let mut stats = stats
+                        .lock()
+                        .map_err(|err| AudioError::Stream(err.to_string()))?;
+                    if let Some(underrun_at) = stats.underrun_at {
+                        if underrun_at.elapsed() > frame_time.saturating_mul(frame_timeout as u32) {
+                            should_run.store(false, Ordering::SeqCst);
+                        }
+                    } else {
+                        stats.underrun_at = Some(Instant::now());
+                    }
+                } else {
+                    break;
+                }
+
+                if wants_low_latency.swap(false, Ordering::SeqCst)
+                    && backend.enable_low_latency()?
+                {
+                    let mut stats = stats
+                        .lock()
+                        .map_err(|err| AudioError::Stream(err.to_string()))?;
+                    stats.low_latency_enabled = true;
+                }
+            }
+            Ok(backend)
+        }));
+        Ok(())
+    }
+
+    pub fn stop(&mut self) -> Result<(), AudioError> {
+        self.should_run.store(false, Ordering::SeqCst);
+        self.queue.1.notify_all();
+        if let Some(worker) = self.worker.take() {
+            match worker.join() {
+                Ok(result) => {
+                    self.backend = Some(result?);
+                }
+                Err(_) => return Err(AudioError::Stream("line sink worker panicked".to_string())),
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<P> Drop for QueuedLineSink<P>
+where
+    P: LinePlayback,
+{
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
 }
 
 #[derive(Debug, Clone)]

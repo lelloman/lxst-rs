@@ -1,11 +1,17 @@
 use lxst::audio::AudioFilter;
 use lxst::{
     Agc, AudioCodec, AudioDeviceKind, AudioFrame, AudioSource, CallProfile, CallState,
-    CallerPolicy, Codec2Codec, CodecError, Mixer, OpusCodec, RawBitDepth, RawCodec, Signal,
-    SignalCode, Telephone, TelephoneConfig, ToneSource,
+    CallerPolicy, Codec2Codec, CodecError, LinePlayback, Mixer, OpusCodec, QueuedLineSink,
+    QueuedLineSinkConfig, RawBitDepth, RawCodec, Signal, SignalCode, Telephone, TelephoneConfig,
+    ToneSource,
 };
 use lxst_core::CodecProfile;
-use std::time::Duration;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[test]
 fn raw_codec_round_trips_f32_frames() {
@@ -222,6 +228,129 @@ fn mixer_tightening_source_limit_drops_oldest_frames() {
 
     assert_eq!(mixer.mix_next().unwrap().unwrap().samples(), &[0.6]);
     assert!(mixer.mix_next().unwrap().is_none());
+}
+
+#[test]
+fn queued_line_sink_applies_backpressure_height() {
+    let fake = FakePlayback::default();
+    let mut sink = QueuedLineSink::new(
+        fake,
+        QueuedLineSinkConfig {
+            samplerate: 8_000,
+            channels: 1,
+            max_frames: 5,
+            autodigest: false,
+            ..QueuedLineSinkConfig::default()
+        },
+    )
+    .unwrap();
+
+    assert!(sink.can_receive());
+    sink.handle_frame(AudioFrame::new(8_000, 1, vec![0.1; 8]).unwrap())
+        .unwrap();
+    sink.handle_frame(AudioFrame::new(8_000, 1, vec![0.2; 8]).unwrap())
+        .unwrap();
+
+    assert_eq!(sink.queued_frames(), 2);
+    assert_eq!(sink.samples_per_frame(), Some(8));
+    assert_eq!(sink.frame_time(), Some(Duration::from_millis(1)));
+    assert!(!sink.can_receive());
+}
+
+#[test]
+fn queued_line_sink_autodigests_frames() {
+    let fake = FakePlayback::default();
+    let played = Arc::clone(&fake.played);
+    let mut sink = QueuedLineSink::new(
+        fake,
+        QueuedLineSinkConfig {
+            samplerate: 8_000,
+            channels: 1,
+            frame_timeout: 100,
+            ..QueuedLineSinkConfig::default()
+        },
+    )
+    .unwrap();
+
+    sink.handle_frame(AudioFrame::new(8_000, 1, vec![0.3; 8]).unwrap())
+        .unwrap();
+
+    wait_for(|| played.lock().unwrap().len() == 1);
+    assert_eq!(played.lock().unwrap()[0].samples(), &[0.3; 8]);
+    assert_eq!(sink.stats().max_latency, Duration::from_millis(3));
+    sink.stop().unwrap();
+}
+
+#[test]
+fn queued_line_sink_stops_after_underrun_timeout() {
+    let fake = FakePlayback::default();
+    let mut sink = QueuedLineSink::new(
+        fake,
+        QueuedLineSinkConfig {
+            samplerate: 8_000,
+            channels: 1,
+            frame_timeout: 2,
+            ..QueuedLineSinkConfig::default()
+        },
+    )
+    .unwrap();
+
+    sink.handle_frame(AudioFrame::new(8_000, 1, vec![0.0; 8]).unwrap())
+        .unwrap();
+
+    wait_for(|| !sink.is_running());
+    assert!(sink.stats().underrun_at.is_some());
+    sink.stop().unwrap();
+}
+
+#[test]
+fn queued_line_sink_can_restart_after_stop() {
+    let fake = FakePlayback::default();
+    let played = Arc::clone(&fake.played);
+    let mut sink = QueuedLineSink::new(
+        fake,
+        QueuedLineSinkConfig {
+            samplerate: 8_000,
+            channels: 1,
+            frame_timeout: 100,
+            ..QueuedLineSinkConfig::default()
+        },
+    )
+    .unwrap();
+
+    sink.handle_frame(AudioFrame::new(8_000, 1, vec![0.1; 8]).unwrap())
+        .unwrap();
+    wait_for(|| played.lock().unwrap().len() == 1);
+    sink.stop().unwrap();
+
+    sink.handle_frame(AudioFrame::new(8_000, 1, vec![0.2; 8]).unwrap())
+        .unwrap();
+    wait_for(|| played.lock().unwrap().len() == 2);
+    sink.stop().unwrap();
+}
+
+#[test]
+fn queued_line_sink_enables_low_latency_at_runtime() {
+    let fake = FakePlayback::default();
+    let low_latency_requests = Arc::clone(&fake.low_latency_requests);
+    let mut sink = QueuedLineSink::new(
+        fake,
+        QueuedLineSinkConfig {
+            samplerate: 8_000,
+            channels: 1,
+            frame_timeout: 100,
+            ..QueuedLineSinkConfig::default()
+        },
+    )
+    .unwrap();
+
+    sink.handle_frame(AudioFrame::new(8_000, 1, vec![0.0; 8]).unwrap())
+        .unwrap();
+    sink.enable_low_latency();
+
+    wait_for(|| low_latency_requests.load(Ordering::SeqCst) == 1);
+    assert!(sink.stats().low_latency_enabled);
+    sink.stop().unwrap();
 }
 
 #[test]
@@ -529,4 +658,33 @@ fn telephone_tick_auto_answers_ringing_call() {
     assert!(telephone.begin_incoming_call(caller));
     telephone.tick();
     assert_eq!(telephone.state(), CallState::Connecting);
+}
+
+#[derive(Clone, Default)]
+struct FakePlayback {
+    played: Arc<Mutex<Vec<AudioFrame>>>,
+    low_latency_requests: Arc<AtomicUsize>,
+}
+
+impl LinePlayback for FakePlayback {
+    fn play(&mut self, frame: AudioFrame) -> Result<(), lxst::AudioError> {
+        self.played.lock().unwrap().push(frame);
+        Ok(())
+    }
+
+    fn enable_low_latency(&mut self) -> Result<bool, lxst::AudioError> {
+        self.low_latency_requests.fetch_add(1, Ordering::SeqCst);
+        Ok(true)
+    }
+}
+
+fn wait_for(mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        if condition() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(condition());
 }
