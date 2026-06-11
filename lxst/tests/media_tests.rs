@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lxst::{
     AudioFrame, AudioSource, MediaError, OpusFileSink, OpusFileSource, QueuedOpusFileSink,
-    QueuedOpusFileSinkConfig,
+    QueuedOpusFileSinkConfig, SourceRecorder,
 };
 use lxst_core::CodecProfile;
 
@@ -139,6 +139,111 @@ fn opus_file_source_timed_mode_waits_between_frames() {
     assert!(source.next_frame().unwrap().is_some());
 
     let _ = fs::remove_file(path);
+}
+
+#[test]
+fn source_recorder_obeys_sink_backpressure_before_pulling() {
+    let path = temp_opus_path("source-recorder-backpressure");
+    let frame = AudioFrame::new(48_000, 2, vec![0.0; 960 * 2]).unwrap();
+    let source = FakeMediaSource::new(48_000, 2, vec![frame.clone(), frame]);
+    let mut recorder = SourceRecorder::create(
+        source,
+        &path,
+        QueuedOpusFileSinkConfig {
+            max_queued_frames: 1,
+            autodigest: false,
+            ..QueuedOpusFileSinkConfig::default()
+        },
+    )
+    .unwrap();
+
+    recorder.start();
+    assert!(recorder.process_next().unwrap());
+    assert_eq!(recorder.source().pulls, 1);
+    assert_eq!(recorder.frames_waiting(), 1);
+    assert!(!recorder.can_receive());
+
+    assert!(!recorder.process_next().unwrap());
+    assert_eq!(recorder.source().pulls, 1);
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn source_recorder_records_source_to_opus_file() {
+    let path = temp_opus_path("source-recorder-file");
+    let frame = AudioFrame::new(48_000, 2, vec![0.0; 960 * 2]).unwrap();
+    let source = FakeMediaSource::new(48_000, 2, vec![frame]);
+    let mut recorder = SourceRecorder::create(
+        source,
+        &path,
+        QueuedOpusFileSinkConfig {
+            finalize_timeout: Duration::from_secs(2),
+            ..QueuedOpusFileSinkConfig::default()
+        },
+    )
+    .unwrap();
+
+    recorder.start();
+    assert!(recorder.is_recording());
+    assert!(recorder.process_next().unwrap());
+    recorder.stop().unwrap();
+    assert!(!recorder.is_recording());
+
+    let source = OpusFileSource::open(&path, 20, false).unwrap();
+    assert!(source.len_samples() >= 960 * 10);
+
+    let _ = fs::remove_file(path);
+}
+
+struct FakeMediaSource {
+    samplerate: u32,
+    channels: u8,
+    frames: std::collections::VecDeque<AudioFrame>,
+    running: bool,
+    pulls: usize,
+}
+
+impl FakeMediaSource {
+    fn new(samplerate: u32, channels: u8, frames: Vec<AudioFrame>) -> Self {
+        Self {
+            samplerate,
+            channels,
+            frames: frames.into(),
+            running: false,
+            pulls: 0,
+        }
+    }
+}
+
+impl AudioSource for FakeMediaSource {
+    fn start(&mut self) {
+        self.running = true;
+    }
+
+    fn stop(&mut self) {
+        self.running = false;
+    }
+
+    fn is_running(&self) -> bool {
+        self.running
+    }
+
+    fn samplerate(&self) -> u32 {
+        self.samplerate
+    }
+
+    fn channels(&self) -> u8 {
+        self.channels
+    }
+
+    fn next_frame(&mut self) -> Result<Option<AudioFrame>, lxst::PipelineError> {
+        if !self.running {
+            return Ok(None);
+        }
+        self.pulls += 1;
+        Ok(self.frames.pop_front())
+    }
 }
 
 fn temp_opus_path(name: &str) -> std::path::PathBuf {

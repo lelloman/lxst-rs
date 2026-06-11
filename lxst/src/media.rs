@@ -466,9 +466,72 @@ impl AudioSource for OpusFileSource {
     }
 }
 
+pub struct SourceRecorder<S>
+where
+    S: AudioSource,
+{
+    source: S,
+    sink: QueuedOpusFileSink,
+}
+
+impl<S> SourceRecorder<S>
+where
+    S: AudioSource,
+{
+    pub fn create(
+        source: S,
+        path: impl AsRef<Path>,
+        config: QueuedOpusFileSinkConfig,
+    ) -> Result<Self, MediaError> {
+        Ok(Self {
+            source,
+            sink: QueuedOpusFileSink::create(path, config)?,
+        })
+    }
+
+    pub fn source(&self) -> &S {
+        &self.source
+    }
+
+    pub fn source_mut(&mut self) -> &mut S {
+        &mut self.source
+    }
+
+    pub fn frames_waiting(&self) -> usize {
+        self.sink.frames_waiting()
+    }
+
+    pub fn can_receive(&self) -> bool {
+        self.sink.can_receive()
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.source.is_running()
+    }
+
+    pub fn start(&mut self) {
+        self.source.start();
+    }
+
+    pub fn stop(&mut self) -> Result<(), MediaError> {
+        self.source.stop();
+        self.sink.stop()
+    }
+
+    pub fn process_next(&mut self) -> Result<bool, MediaError> {
+        if !self.sink.can_receive() {
+            return Ok(false);
+        }
+        let Some(frame) = self.source.next_frame()? else {
+            return Ok(false);
+        };
+        self.sink.handle_frame(frame)?;
+        Ok(true)
+    }
+}
+
 pub struct FileRecorder {
-    source: CpalInputSource,
-    sink: OpusFileSink,
+    inner: SourceRecorder<CpalInputSource>,
 }
 
 impl FileRecorder {
@@ -481,25 +544,27 @@ impl FileRecorder {
         })?;
         source.add_filter(BandPass::new(25.0, 24_000.0)?);
         source.add_filter(Agc::new(-12.0, 12.0));
-        let sink = OpusFileSink::create(path, CodecProfile::OpusAudioMax)?;
-        Ok(Self { source, sink })
+        let inner = SourceRecorder::create(
+            source,
+            path,
+            QueuedOpusFileSinkConfig {
+                profile: CodecProfile::OpusAudioMax,
+                ..QueuedOpusFileSinkConfig::default()
+            },
+        )?;
+        Ok(Self { inner })
     }
 
     pub fn start(&mut self) {
-        self.source.start();
+        self.inner.start();
     }
 
     pub fn stop(&mut self) -> Result<(), MediaError> {
-        self.source.stop();
-        self.sink.finalize()
+        self.inner.stop()
     }
 
     pub fn process_next(&mut self) -> Result<bool, MediaError> {
-        let Some(frame) = self.source.next_frame()? else {
-            return Ok(false);
-        };
-        self.sink.handle_frame(&frame)?;
-        Ok(true)
+        self.inner.process_next()
     }
 }
 
