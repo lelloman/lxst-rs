@@ -612,6 +612,8 @@ where
 {
     source: S,
     sink: K,
+    finished_callback: Option<Box<dyn FnMut() + Send>>,
+    finished_notified: bool,
 }
 
 impl<S, K> SourcePlayer<S, K>
@@ -620,7 +622,12 @@ where
     K: AudioFrameSink,
 {
     pub fn new(source: S, sink: K) -> Self {
-        Self { source, sink }
+        Self {
+            source,
+            sink,
+            finished_callback: None,
+            finished_notified: false,
+        }
     }
 
     pub fn source(&self) -> &S {
@@ -643,7 +650,16 @@ where
         self.source.is_running()
     }
 
+    pub fn set_finished_callback(&mut self, callback: impl FnMut() + Send + 'static) {
+        self.finished_callback = Some(Box::new(callback));
+    }
+
+    pub fn clear_finished_callback(&mut self) {
+        self.finished_callback = None;
+    }
+
     pub fn start(&mut self) -> Result<(), MediaError> {
+        self.finished_notified = false;
         self.source.start();
         if let Err(error) = self.sink.start() {
             self.source.stop();
@@ -661,11 +677,25 @@ where
         if !self.sink.can_receive() {
             return Ok(false);
         }
+        let was_playing = self.source.is_running();
         let Some(frame) = self.source.next_frame()? else {
+            if was_playing && !self.source.is_running() {
+                self.notify_finished();
+            }
             return Ok(false);
         };
         self.sink.handle_frame(frame)?;
         Ok(true)
+    }
+
+    fn notify_finished(&mut self) {
+        if self.finished_notified {
+            return;
+        }
+        self.finished_notified = true;
+        if let Some(callback) = &mut self.finished_callback {
+            callback();
+        }
     }
 }
 
@@ -692,6 +722,14 @@ impl FilePlayer {
 
     pub fn process_next(&mut self) -> Result<bool, MediaError> {
         self.inner.process_next()
+    }
+
+    pub fn set_finished_callback(&mut self, callback: impl FnMut() + Send + 'static) {
+        self.inner.set_finished_callback(callback);
+    }
+
+    pub fn clear_finished_callback(&mut self) {
+        self.inner.clear_finished_callback();
     }
 }
 

@@ -1,4 +1,8 @@
 use std::fs;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -183,6 +187,31 @@ fn source_player_starts_outputs_frames_and_stops() {
 }
 
 #[test]
+fn source_player_calls_finished_callback_once_on_eof() {
+    let frame = AudioFrame::new(48_000, 2, vec![0.0; 960 * 2]).unwrap();
+    let source = FakeMediaSource::new(48_000, 2, vec![frame]);
+    let sink = FakeFrameSink {
+        can_receive: true,
+        ..FakeFrameSink::default()
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let callback_calls = Arc::clone(&calls);
+    let mut player = SourcePlayer::new(source, sink);
+    player.set_finished_callback(move || {
+        callback_calls.fetch_add(1, Ordering::SeqCst);
+    });
+
+    player.start().unwrap();
+    assert!(player.process_next().unwrap());
+    assert!(!player.process_next().unwrap());
+    assert!(!player.is_playing());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    assert!(!player.process_next().unwrap());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn source_recorder_obeys_sink_backpressure_before_pulling() {
     let path = temp_opus_path("source-recorder-backpressure");
     let frame = AudioFrame::new(48_000, 2, vec![0.0; 960 * 2]).unwrap();
@@ -311,7 +340,11 @@ impl AudioSource for FakeMediaSource {
             return Ok(None);
         }
         self.pulls += 1;
-        Ok(self.frames.pop_front())
+        let frame = self.frames.pop_front();
+        if frame.is_none() {
+            self.running = false;
+        }
+        Ok(frame)
     }
 }
 
