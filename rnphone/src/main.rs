@@ -550,6 +550,34 @@ impl Drop for CallAudio {
     }
 }
 
+fn transmit_audio_frame<S, C, K>(
+    source: &mut S,
+    codec: &mut C,
+    sink: &mut K,
+) -> Result<bool, String>
+where
+    S: AudioSource + ?Sized,
+    C: AudioCodec + ?Sized,
+    K: AudioSink + ?Sized,
+{
+    if !sink.can_receive() {
+        return Ok(false);
+    }
+
+    let Some(frame) = source.next_frame().map_err(|e| e.to_string())? else {
+        return Ok(false);
+    };
+
+    let encoded = EncodedAudioFrame {
+        codec: codec.kind(),
+        samplerate: frame.samplerate(),
+        channels: frame.channels(),
+        payload: codec.encode(&frame).map_err(|e| e.to_string())?,
+    };
+    sink.handle_frame(encoded).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 fn run_call_audio_loop(
     mut input: CpalInputSource,
     mut transmit_codec: Box<dyn AudioCodec>,
@@ -560,17 +588,7 @@ fn run_call_audio_loop(
 ) -> Result<(), String> {
     input.start();
     while stop_rx.try_recv().is_err() {
-        if let Some(frame) = input.next_frame().map_err(|e| e.to_string())? {
-            let encoded = EncodedAudioFrame {
-                codec: transmit_codec.kind(),
-                samplerate: frame.samplerate(),
-                channels: frame.channels(),
-                payload: transmit_codec.encode(&frame).map_err(|e| e.to_string())?,
-            };
-            packetizer
-                .handle_frame(encoded)
-                .map_err(|e| e.to_string())?;
-        }
+        transmit_audio_frame(&mut input, transmit_codec.as_mut(), &mut packetizer)?;
 
         {
             let mut source = link_source.lock().map_err(|e| e.to_string())?;
@@ -944,6 +962,102 @@ mod tests {
             .starts_with(b"OggS"));
 
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn transmit_audio_frame_obeys_sink_backpressure() {
+        let mut source =
+            FakeInputSource::with_frame(lxst::AudioFrame::new(8_000, 1, vec![0.0, 0.25]).unwrap());
+        source.start();
+        let mut codec = lxst::RawCodec::default();
+        let mut sink = FakeTransmitSink {
+            can_receive: false,
+            frames: Vec::new(),
+        };
+
+        let transmitted = transmit_audio_frame(&mut source, &mut codec, &mut sink).unwrap();
+
+        assert!(!transmitted);
+        assert_eq!(source.pulls, 0);
+        assert!(sink.frames.is_empty());
+    }
+
+    #[test]
+    fn transmit_audio_frame_encodes_when_sink_can_receive() {
+        let mut source =
+            FakeInputSource::with_frame(lxst::AudioFrame::new(8_000, 1, vec![0.0, 0.25]).unwrap());
+        source.start();
+        let mut codec = lxst::RawCodec::default();
+        let mut sink = FakeTransmitSink {
+            can_receive: true,
+            frames: Vec::new(),
+        };
+
+        let transmitted = transmit_audio_frame(&mut source, &mut codec, &mut sink).unwrap();
+
+        assert!(transmitted);
+        assert_eq!(source.pulls, 1);
+        assert_eq!(sink.frames.len(), 1);
+        assert_eq!(sink.frames[0].codec, lxst::core::CodecKind::Raw);
+    }
+
+    struct FakeInputSource {
+        frames: std::collections::VecDeque<lxst::AudioFrame>,
+        running: bool,
+        pulls: usize,
+    }
+
+    impl FakeInputSource {
+        fn with_frame(frame: lxst::AudioFrame) -> Self {
+            Self {
+                frames: std::collections::VecDeque::from([frame]),
+                running: false,
+                pulls: 0,
+            }
+        }
+    }
+
+    impl AudioSource for FakeInputSource {
+        fn start(&mut self) {
+            self.running = true;
+        }
+
+        fn stop(&mut self) {
+            self.running = false;
+        }
+
+        fn is_running(&self) -> bool {
+            self.running
+        }
+
+        fn samplerate(&self) -> u32 {
+            8_000
+        }
+
+        fn channels(&self) -> u8 {
+            1
+        }
+
+        fn next_frame(&mut self) -> Result<Option<lxst::AudioFrame>, lxst::PipelineError> {
+            self.pulls += 1;
+            Ok(self.frames.pop_front())
+        }
+    }
+
+    struct FakeTransmitSink {
+        can_receive: bool,
+        frames: Vec<EncodedAudioFrame>,
+    }
+
+    impl AudioSink for FakeTransmitSink {
+        fn can_receive(&self) -> bool {
+            self.can_receive
+        }
+
+        fn handle_frame(&mut self, frame: EncodedAudioFrame) -> Result<(), lxst::PipelineError> {
+            self.frames.push(frame);
+            Ok(())
+        }
     }
 
     fn temp_config_dir(name: &str) -> PathBuf {
