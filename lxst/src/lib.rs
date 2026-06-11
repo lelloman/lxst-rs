@@ -23,8 +23,8 @@ pub use codec::{
 };
 pub use hardware::{Key, KeyTransition, KeypadEvent, Lcd1602Buffer, MatrixKeypad};
 pub use media::{
-    FilePlayer, FileRecorder, MediaError, OpusFileSink, OpusFileSource, QueuedOpusFileSink,
-    QueuedOpusFileSinkConfig, SourceRecorder,
+    AudioFrameSink, FilePlayer, FileRecorder, MediaError, OpusFileSink, OpusFileSource,
+    QueuedOpusFileSink, QueuedOpusFileSinkConfig, SourcePlayer, SourceRecorder,
 };
 pub use network::{
     telephony_callback_channel, LinkSource, LxstLinkSender, NetworkError, PacketSender, Packetizer,

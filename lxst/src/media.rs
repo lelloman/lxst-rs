@@ -27,6 +27,43 @@ const OPUS_FILE_MAX_FRAMES: usize = 64;
 const OPUS_FILE_AUTOSTART_MIN: usize = 1;
 const OPUS_FILE_FINALIZE_TIMEOUT: Duration = Duration::from_secs(2);
 
+pub trait AudioFrameSink {
+    fn start(&mut self) -> Result<(), MediaError> {
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), MediaError> {
+        Ok(())
+    }
+
+    fn can_receive(&self) -> bool {
+        true
+    }
+
+    fn handle_frame(&mut self, frame: AudioFrame) -> Result<(), MediaError>;
+}
+
+impl AudioFrameSink for CpalOutputSink {
+    fn start(&mut self) -> Result<(), MediaError> {
+        CpalOutputSink::start(self)?;
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), MediaError> {
+        CpalOutputSink::stop(self)?;
+        Ok(())
+    }
+
+    fn can_receive(&self) -> bool {
+        CpalOutputSink::can_receive(self)
+    }
+
+    fn handle_frame(&mut self, frame: AudioFrame) -> Result<(), MediaError> {
+        CpalOutputSink::handle_frame(self, frame)?;
+        Ok(())
+    }
+}
+
 pub struct OpusFileSink {
     path: PathBuf,
     profile: CodecProfile,
@@ -568,28 +605,56 @@ impl FileRecorder {
     }
 }
 
-pub struct FilePlayer {
-    source: OpusFileSource,
-    sink: CpalOutputSink,
+pub struct SourcePlayer<S, K>
+where
+    S: AudioSource,
+    K: AudioFrameSink,
+{
+    source: S,
+    sink: K,
 }
 
-impl FilePlayer {
-    pub fn new(path: impl AsRef<Path>, looping: bool) -> Result<Self, MediaError> {
-        let source = OpusFileSource::open(path, 100, looping)?;
-        let sink = CpalOutputSink::new(CpalOutputConfig::default())?;
-        Ok(Self { source, sink })
+impl<S, K> SourcePlayer<S, K>
+where
+    S: AudioSource,
+    K: AudioFrameSink,
+{
+    pub fn new(source: S, sink: K) -> Self {
+        Self { source, sink }
+    }
+
+    pub fn source(&self) -> &S {
+        &self.source
+    }
+
+    pub fn source_mut(&mut self) -> &mut S {
+        &mut self.source
+    }
+
+    pub fn sink(&self) -> &K {
+        &self.sink
+    }
+
+    pub fn sink_mut(&mut self) -> &mut K {
+        &mut self.sink
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.source.is_running()
     }
 
     pub fn start(&mut self) -> Result<(), MediaError> {
         self.source.start();
-        self.sink.start()?;
+        if let Err(error) = self.sink.start() {
+            self.source.stop();
+            return Err(error);
+        }
         Ok(())
     }
 
     pub fn stop(&mut self) -> Result<(), MediaError> {
         self.source.stop();
-        self.sink.stop()?;
-        Ok(())
+        self.sink.stop()
     }
 
     pub fn process_next(&mut self) -> Result<bool, MediaError> {
@@ -601,6 +666,32 @@ impl FilePlayer {
         };
         self.sink.handle_frame(frame)?;
         Ok(true)
+    }
+}
+
+pub struct FilePlayer {
+    inner: SourcePlayer<OpusFileSource, CpalOutputSink>,
+}
+
+impl FilePlayer {
+    pub fn new(path: impl AsRef<Path>, looping: bool) -> Result<Self, MediaError> {
+        let source = OpusFileSource::open(path, 100, looping)?;
+        let sink = CpalOutputSink::new(CpalOutputConfig::default())?;
+        Ok(Self {
+            inner: SourcePlayer::new(source, sink),
+        })
+    }
+
+    pub fn start(&mut self) -> Result<(), MediaError> {
+        self.inner.start()
+    }
+
+    pub fn stop(&mut self) -> Result<(), MediaError> {
+        self.inner.stop()
+    }
+
+    pub fn process_next(&mut self) -> Result<bool, MediaError> {
+        self.inner.process_next()
     }
 }
 

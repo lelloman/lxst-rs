@@ -3,8 +3,8 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lxst::{
-    AudioFrame, AudioSource, MediaError, OpusFileSink, OpusFileSource, QueuedOpusFileSink,
-    QueuedOpusFileSinkConfig, SourceRecorder,
+    AudioFrame, AudioFrameSink, AudioSource, MediaError, OpusFileSink, OpusFileSource,
+    QueuedOpusFileSink, QueuedOpusFileSinkConfig, SourcePlayer, SourceRecorder,
 };
 use lxst_core::CodecProfile;
 
@@ -142,6 +142,47 @@ fn opus_file_source_timed_mode_waits_between_frames() {
 }
 
 #[test]
+fn source_player_obeys_sink_backpressure_before_pulling() {
+    let frame = AudioFrame::new(48_000, 2, vec![0.0; 960 * 2]).unwrap();
+    let source = FakeMediaSource::new(48_000, 2, vec![frame]);
+    let sink = FakeFrameSink {
+        can_receive: false,
+        ..FakeFrameSink::default()
+    };
+    let mut player = SourcePlayer::new(source, sink);
+
+    player.start().unwrap();
+    assert!(player.is_playing());
+    assert!(!player.process_next().unwrap());
+
+    assert_eq!(player.source().pulls, 0);
+    assert!(player.sink().frames.is_empty());
+}
+
+#[test]
+fn source_player_starts_outputs_frames_and_stops() {
+    let frame = AudioFrame::new(48_000, 2, vec![0.0; 960 * 2]).unwrap();
+    let source = FakeMediaSource::new(48_000, 2, vec![frame]);
+    let sink = FakeFrameSink {
+        can_receive: true,
+        ..FakeFrameSink::default()
+    };
+    let mut player = SourcePlayer::new(source, sink);
+
+    player.start().unwrap();
+    assert!(player.is_playing());
+    assert!(player.sink().running);
+
+    assert!(player.process_next().unwrap());
+    assert_eq!(player.source().pulls, 1);
+    assert_eq!(player.sink().frames.len(), 1);
+
+    player.stop().unwrap();
+    assert!(!player.is_playing());
+    assert!(!player.sink().running);
+}
+
+#[test]
 fn source_recorder_obeys_sink_backpressure_before_pulling() {
     let path = temp_opus_path("source-recorder-backpressure");
     let frame = AudioFrame::new(48_000, 2, vec![0.0; 960 * 2]).unwrap();
@@ -194,6 +235,34 @@ fn source_recorder_records_source_to_opus_file() {
     assert!(source.len_samples() >= 960 * 10);
 
     let _ = fs::remove_file(path);
+}
+
+#[derive(Default)]
+struct FakeFrameSink {
+    can_receive: bool,
+    running: bool,
+    frames: Vec<AudioFrame>,
+}
+
+impl AudioFrameSink for FakeFrameSink {
+    fn start(&mut self) -> Result<(), MediaError> {
+        self.running = true;
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), MediaError> {
+        self.running = false;
+        Ok(())
+    }
+
+    fn can_receive(&self) -> bool {
+        self.can_receive
+    }
+
+    fn handle_frame(&mut self, frame: AudioFrame) -> Result<(), MediaError> {
+        self.frames.push(frame);
+        Ok(())
+    }
 }
 
 struct FakeMediaSource {
