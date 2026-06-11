@@ -1,9 +1,9 @@
 use lxst::audio::AudioFilter;
 use lxst::{
     plan_line_source_frame, Agc, AudioCodec, AudioDeviceKind, AudioFrame, AudioSource, CallProfile,
-    CallState, CallerPolicy, Codec2Codec, CodecError, LinePlayback, Mixer, OpusCodec,
-    QueuedLineSink, QueuedLineSinkConfig, RawBitDepth, RawCodec, Signal, SignalCode, Telephone,
-    TelephoneConfig, ToneSource,
+    CallState, CallerPolicy, Codec2Codec, CodecError, LinePlayback, LineSourceProcessor, Mixer,
+    OpusCodec, QueuedLineSink, QueuedLineSinkConfig, RawBitDepth, RawCodec, Signal, SignalCode,
+    Telephone, TelephoneConfig, ToneSource,
 };
 use lxst_core::CodecProfile;
 use std::sync::{
@@ -265,6 +265,57 @@ fn line_source_frame_plan_leaves_unconstrained_profiles_unchanged() {
     assert_eq!(plan.target_frame_ms, 80.0);
     assert_eq!(plan.frame_count, 3_840);
     assert_eq!(plan.sample_count, 7_680);
+}
+
+#[test]
+fn line_source_processor_skips_before_filters() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut processor =
+        LineSourceProcessor::new(0.0, Duration::ZERO, Duration::from_millis(1), 1_000, 1);
+    processor.add_filter(CountingFilter {
+        calls: Arc::clone(&calls),
+    });
+
+    let skipped = processor.process_frame(AudioFrame::new(1_000, 1, vec![0.5]).unwrap());
+    assert!(skipped.is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(processor.skipped_samples(), 1);
+
+    let passed = processor
+        .process_frame(AudioFrame::new(1_000, 1, vec![0.5]).unwrap())
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(passed.samples(), &[0.5]);
+}
+
+#[test]
+fn line_source_processor_filters_before_frame_level_ease() {
+    let mut processor =
+        LineSourceProcessor::new(0.0, Duration::from_millis(2), Duration::ZERO, 1_000, 1);
+    processor.add_filter(AddFilter { amount: 1.0 });
+
+    let muted = processor
+        .process_frame(AudioFrame::new(1_000, 1, vec![-0.5, -0.5]).unwrap())
+        .unwrap();
+    assert_eq!(muted.samples(), &[0.0, 0.0]);
+    assert_eq!(processor.processed_samples(), 2);
+
+    let gained = processor
+        .process_frame(AudioFrame::new(1_000, 1, vec![-0.5]).unwrap())
+        .unwrap();
+    assert_eq!(gained.samples(), &[0.5]);
+}
+
+#[test]
+fn line_source_processor_applies_gain_after_filters_and_clips() {
+    let mut processor = LineSourceProcessor::new(10.0, Duration::ZERO, Duration::ZERO, 8_000, 1);
+    processor.add_filter(AddFilter { amount: 0.05 });
+
+    let frame = processor
+        .process_frame(AudioFrame::new(8_000, 1, vec![0.05, 0.2]).unwrap())
+        .unwrap();
+
+    assert_eq!(frame.samples(), &[1.0, 1.0]);
 }
 
 #[test]
@@ -695,6 +746,27 @@ fn telephone_tick_auto_answers_ringing_call() {
     assert!(telephone.begin_incoming_call(caller));
     telephone.tick();
     assert_eq!(telephone.state(), CallState::Connecting);
+}
+
+struct CountingFilter {
+    calls: Arc<AtomicUsize>,
+}
+
+impl AudioFilter for CountingFilter {
+    fn process(&mut self, frame: AudioFrame) -> AudioFrame {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        frame
+    }
+}
+
+struct AddFilter {
+    amount: f32,
+}
+
+impl AudioFilter for AddFilter {
+    fn process(&mut self, frame: AudioFrame) -> AudioFrame {
+        frame.map_samples(|sample| sample + self.amount)
+    }
 }
 
 #[derive(Clone, Default)]

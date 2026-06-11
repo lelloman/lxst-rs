@@ -502,6 +502,84 @@ fn codec_timing(profile: CodecProfile) -> Option<CodecTiming> {
     }
 }
 
+pub struct LineSourceProcessor {
+    filters: Vec<Box<dyn AudioFilter>>,
+    gain_db: f32,
+    target_gain: f32,
+    current_gain: f32,
+    ease_samples: usize,
+    skip_samples: usize,
+    skipped_samples: usize,
+    processed_samples: usize,
+}
+
+impl LineSourceProcessor {
+    pub fn new(
+        gain_db: f32,
+        ease_in: Duration,
+        skip: Duration,
+        samplerate: u32,
+        channels: u8,
+    ) -> Self {
+        let target_gain = linear_gain(gain_db);
+        let ease_samples = duration_samples(ease_in, samplerate, channels);
+        let current_gain = if ease_samples == 0 { target_gain } else { 0.0 };
+
+        Self {
+            filters: Vec::new(),
+            gain_db,
+            target_gain,
+            current_gain,
+            ease_samples,
+            skip_samples: duration_samples(skip, samplerate, channels),
+            skipped_samples: 0,
+            processed_samples: 0,
+        }
+    }
+
+    pub fn add_filter(&mut self, filter: impl AudioFilter + 'static) {
+        self.filters.push(Box::new(filter));
+    }
+
+    pub fn gain_db(&self) -> f32 {
+        self.gain_db
+    }
+
+    pub fn skipped_samples(&self) -> usize {
+        self.skipped_samples
+    }
+
+    pub fn processed_samples(&self) -> usize {
+        self.processed_samples
+    }
+
+    pub fn process_frame(&mut self, mut frame: AudioFrame) -> Option<AudioFrame> {
+        if self.skipped_samples < self.skip_samples {
+            self.skipped_samples += frame.samples().len();
+            return None;
+        }
+
+        for filter in &mut self.filters {
+            frame = filter.process(frame);
+        }
+
+        if (self.current_gain - 1.0).abs() > f32::EPSILON {
+            for sample in frame.samples_mut() {
+                *sample *= self.current_gain;
+            }
+        }
+
+        self.processed_samples += frame.samples().len();
+        if self.ease_samples > 0 && self.current_gain < self.target_gain {
+            let progress =
+                (self.processed_samples as f32 / self.ease_samples as f32).clamp(0.0, 1.0);
+            self.current_gain = (self.target_gain * progress).min(self.target_gain);
+        }
+
+        Some(frame.clipped())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HighPass {
     cut: f32,
@@ -907,12 +985,7 @@ pub struct CpalInputSource {
     stream: cpal::Stream,
     rx: mpsc::Receiver<AudioFrame>,
     running: bool,
-    filters: Vec<Box<dyn AudioFilter>>,
-    gain_db: f32,
-    target_gain: f32,
-    ease_samples: usize,
-    skip_samples: usize,
-    processed_samples: usize,
+    processor: LineSourceProcessor,
 }
 
 impl CpalInputSource {
@@ -947,30 +1020,29 @@ impl CpalInputSource {
                 return Err(AudioError::UnsupportedDeviceFormat(other.to_string()));
             }
         };
-        let target_gain = linear_gain(config.gain_db);
-        let ease_samples = duration_samples(config.ease_in, samplerate, channels);
-        let skip_samples = duration_samples(config.skip, samplerate, channels);
+        let processor = LineSourceProcessor::new(
+            config.gain_db,
+            config.ease_in,
+            config.skip,
+            samplerate,
+            channels,
+        );
         Ok(Self {
             samplerate,
             channels,
             stream,
             rx,
             running: false,
-            filters: Vec::new(),
-            gain_db: config.gain_db,
-            target_gain,
-            ease_samples,
-            skip_samples,
-            processed_samples: 0,
+            processor,
         })
     }
 
     pub fn add_filter(&mut self, filter: impl AudioFilter + 'static) {
-        self.filters.push(Box::new(filter));
+        self.processor.add_filter(filter);
     }
 
     pub fn gain_db(&self) -> f32 {
-        self.gain_db
+        self.processor.gain_db()
     }
 }
 
@@ -1002,33 +1074,10 @@ impl crate::pipeline::AudioSource for CpalInputSource {
         if !self.running {
             return Ok(None);
         }
-        let Ok(mut frame) = self.rx.try_recv() else {
+        let Ok(frame) = self.rx.try_recv() else {
             return Ok(None);
         };
-        if self.processed_samples < self.skip_samples {
-            self.processed_samples += frame.samples().len();
-            return Ok(None);
-        }
-        for filter in &mut self.filters {
-            frame = filter.process(frame);
-        }
-        if self.target_gain != 1.0 {
-            let samples = frame.samples_mut();
-            for sample in samples.iter_mut() {
-                let ease_gain = if self.ease_samples == 0 {
-                    self.target_gain
-                } else {
-                    let progress =
-                        (self.processed_samples as f32 / self.ease_samples as f32).clamp(0.0, 1.0);
-                    self.target_gain * progress
-                };
-                *sample *= ease_gain;
-                self.processed_samples += 1;
-            }
-        } else {
-            self.processed_samples += frame.samples().len();
-        }
-        Ok(Some(frame.clipped()))
+        Ok(self.processor.process_frame(frame))
     }
 }
 
