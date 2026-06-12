@@ -797,6 +797,33 @@ fn telephone_selects_outgoing_profile_preference() {
 }
 
 #[test]
+fn telephone_outgoing_signalling_follows_python_order() {
+    let remote = [0x23; 16];
+    let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
+
+    assert!(telephone.begin_outgoing_call(remote));
+    assert_eq!(telephone.state(), CallState::Calling);
+
+    telephone.apply_signal(Signal::Code(SignalCode::Available));
+    assert_eq!(telephone.state(), CallState::Calling);
+
+    telephone.apply_signal(Signal::Code(SignalCode::Ringing));
+    assert_eq!(telephone.state(), CallState::Ringing);
+
+    telephone.apply_signal(Signal::Code(SignalCode::Connecting));
+    assert_eq!(telephone.state(), CallState::Connecting);
+
+    telephone.apply_signal(Signal::Code(SignalCode::Established));
+    assert_eq!(telephone.state(), CallState::Established);
+
+    let events: Vec<_> = rx.try_iter().collect();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        lxst::telephony::CallEvent::CallEstablished { identity_hash } if *identity_hash == remote
+    )));
+}
+
+#[test]
 fn telephone_low_latency_output_setting_emits_change() {
     let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
 

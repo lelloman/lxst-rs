@@ -445,7 +445,7 @@ impl Telephone {
                 let _ = self.events.send(CallEvent::Busy { identity_hash });
             }
             Signal::Code(SignalCode::Rejected) => self.reject(),
-            Signal::Code(SignalCode::Available) => self.set_state(CallState::Connecting),
+            Signal::Code(SignalCode::Available) => {}
             Signal::Code(SignalCode::Ringing) => {
                 self.call_deadline = Some(Instant::now() + self.config.wait_time);
                 self.set_state(CallState::Ringing);
