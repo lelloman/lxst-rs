@@ -459,7 +459,9 @@ impl Telephone {
             }
             Signal::Code(SignalCode::Calling) => {}
             Signal::PreferredProfile(profile) => {
-                self.select_call_profile(Some(profile));
+                if self.has_active_call() {
+                    self.select_call_profile(Some(profile));
+                }
             }
             Signal::Unknown(_) => {}
         }

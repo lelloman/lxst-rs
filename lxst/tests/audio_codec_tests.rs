@@ -740,10 +740,86 @@ fn telephone_hangup_rejects_ringing_incoming_call() {
 }
 
 #[test]
-fn telephone_applies_profile_signalling() {
-    let (mut telephone, _rx) = Telephone::new(TelephoneConfig::default());
+fn telephone_ignores_idle_profile_signalling() {
+    let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
+
     telephone.apply_signal(Signal::PreferredProfile(CallProfile::LowLatency));
+
+    assert_eq!(telephone.active_profile(), CallProfile::DEFAULT);
+    let events: Vec<_> = rx.try_iter().collect();
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, lxst::telephony::CallEvent::ProfileChanged(_))));
+}
+
+#[test]
+fn telephone_applies_active_profile_signalling_without_state_change() {
+    let remote = [0x14; 16];
+    let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
+
+    assert!(telephone.begin_outgoing_call(remote));
+    telephone.apply_signal(Signal::PreferredProfile(CallProfile::LowLatency));
+
+    assert_eq!(telephone.state(), CallState::Calling);
     assert_eq!(telephone.active_profile(), CallProfile::LowLatency);
+    let events: Vec<_> = rx.try_iter().collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, lxst::telephony::CallEvent::ProfileChanged(_)))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn telephone_suppresses_duplicate_profile_signalling() {
+    let remote = [0x15; 16];
+    let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
+
+    assert!(telephone.begin_outgoing_call(remote));
+    telephone.apply_signal(Signal::PreferredProfile(CallProfile::LowLatency));
+    telephone.apply_signal(Signal::PreferredProfile(CallProfile::LowLatency));
+
+    assert_eq!(telephone.active_profile(), CallProfile::LowLatency);
+    let events: Vec<_> = rx.try_iter().collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    lxst::telephony::CallEvent::ProfileChanged(CallProfile::LowLatency)
+                )
+            })
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn telephone_established_profile_signal_keeps_call_established() {
+    let remote = [0x16; 16];
+    let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
+
+    assert!(telephone.begin_outgoing_call(remote));
+    assert!(telephone.establish());
+    telephone.apply_signal(Signal::PreferredProfile(CallProfile::UltraLowLatency));
+
+    assert_eq!(telephone.state(), CallState::Established);
+    assert_eq!(telephone.active_profile(), CallProfile::UltraLowLatency);
+    let events: Vec<_> = rx.try_iter().collect();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        lxst::telephony::CallEvent::ProfileChanged(CallProfile::UltraLowLatency)
+    )));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, lxst::telephony::CallEvent::StateChanged(_)))
+            .count(),
+        2
+    );
 }
 
 #[test]
