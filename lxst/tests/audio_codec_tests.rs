@@ -2,12 +2,12 @@ use lxst::audio::AudioFilter;
 use lxst::{
     plan_line_source_frame, Agc, AudioCodec, AudioDeviceKind, AudioFrame, AudioSource, CallProfile,
     CallState, CallerPolicy, Codec2Codec, CodecError, LinePlayback, LineSourceProcessor, Mixer,
-    OpusCodec, QueuedLineSink, QueuedLineSinkConfig, RawBitDepth, RawCodec, Signal, SignalCode,
-    Telephone, TelephoneConfig, ToneSource,
+    MixerRuntime, MixerSink, OpusCodec, QueuedLineSink, QueuedLineSinkConfig, RawBitDepth,
+    RawCodec, Signal, SignalCode, Telephone, TelephoneConfig, ToneSource,
 };
 use lxst_core::CodecProfile;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex,
 };
 use std::thread;
@@ -285,6 +285,57 @@ fn mixer_tightening_source_limit_drops_oldest_frames() {
 
     assert_eq!(mixer.mix_next().unwrap().unwrap().samples(), &[0.6]);
     assert!(mixer.mix_next().unwrap().is_none());
+}
+
+#[test]
+fn mixer_runtime_drains_mixed_frames_to_sink() {
+    let sink = FakeMixerSink::new(true);
+    let received = Arc::clone(&sink.frames);
+    let mut runtime = MixerRuntime::start(Mixer::default(), sink, Duration::from_millis(1));
+    let mixer = runtime.mixer();
+
+    {
+        let mut mixer = mixer.lock().unwrap();
+        mixer.push(1, AudioFrame::new(8_000, 1, vec![0.5]).unwrap());
+        mixer.push(2, AudioFrame::new(8_000, 1, vec![0.25]).unwrap());
+    }
+
+    wait_until(Duration::from_millis(100), || {
+        received.lock().unwrap().len() == 1
+    });
+    {
+        let frames = received.lock().unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].samples(), &[0.75]);
+    }
+    assert!(runtime.stop().unwrap().is_some());
+    assert!(!runtime.is_running());
+}
+
+#[test]
+fn mixer_runtime_respects_sink_backpressure() {
+    let sink = FakeMixerSink::new(false);
+    let received = Arc::clone(&sink.frames);
+    let accepting = Arc::clone(&sink.accepting);
+    let mut runtime = MixerRuntime::start(Mixer::default(), sink, Duration::from_millis(1));
+    let mixer = runtime.mixer();
+
+    mixer
+        .lock()
+        .unwrap()
+        .push(1, AudioFrame::new(8_000, 1, vec![0.5]).unwrap());
+    thread::sleep(Duration::from_millis(20));
+
+    assert_eq!(mixer.lock().unwrap().queued_frames(1), 1);
+    assert!(received.lock().unwrap().is_empty());
+
+    accepting.store(true, Ordering::SeqCst);
+    wait_until(Duration::from_millis(100), || {
+        received.lock().unwrap().len() == 1
+    });
+    assert_eq!(mixer.lock().unwrap().queued_frames(1), 0);
+    assert_eq!(received.lock().unwrap()[0].samples(), &[0.5]);
+    assert!(runtime.stop().unwrap().is_some());
 }
 
 #[test]
@@ -823,6 +874,41 @@ struct AddFilter {
 impl AudioFilter for AddFilter {
     fn process(&mut self, frame: AudioFrame) -> AudioFrame {
         frame.map_samples(|sample| sample + self.amount)
+    }
+}
+
+struct FakeMixerSink {
+    frames: Arc<Mutex<Vec<AudioFrame>>>,
+    accepting: Arc<AtomicBool>,
+}
+
+impl FakeMixerSink {
+    fn new(accepting: bool) -> Self {
+        Self {
+            frames: Arc::new(Mutex::new(Vec::new())),
+            accepting: Arc::new(AtomicBool::new(accepting)),
+        }
+    }
+}
+
+impl MixerSink for FakeMixerSink {
+    fn can_receive(&self) -> bool {
+        self.accepting.load(Ordering::SeqCst)
+    }
+
+    fn handle_frame(&mut self, frame: AudioFrame) -> Result<(), lxst::AudioError> {
+        self.frames.lock().unwrap().push(frame);
+        Ok(())
+    }
+}
+
+fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if condition() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(1));
     }
 }
 

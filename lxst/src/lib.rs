@@ -14,8 +14,8 @@ pub use audio::{
     list_audio_devices, plan_line_source_frame, Agc, AudioDeviceInfo, AudioDeviceKind, AudioError,
     AudioFrame, AudioStreamConfigInfo, BandPass, CpalInputConfig, CpalInputSource,
     CpalOutputConfig, CpalOutputSink, HighPass, LinePlayback, LineSourceFramePlan,
-    LineSourceProcessor, LowPass, Mixer, QueuedLineSink, QueuedLineSinkConfig, QueuedLineSinkStats,
-    ToneSource,
+    LineSourceProcessor, LowPass, Mixer, MixerRuntime, MixerSink, QueuedLineSink,
+    QueuedLineSinkConfig, QueuedLineSinkStats, ToneSource,
 };
 pub use codec::{
     AudioCodec, Codec2Codec, CodecError, CodecFactory, CodecSelection, CodecState, NullCodec,

@@ -847,6 +847,14 @@ impl AudioFilter for Agc {
     }
 }
 
+pub trait MixerSink: Send + 'static {
+    fn can_receive(&self) -> bool {
+        true
+    }
+
+    fn handle_frame(&mut self, frame: AudioFrame) -> Result<(), AudioError>;
+}
+
 #[derive(Debug, Clone)]
 pub struct Mixer {
     queues: HashMap<u64, VecDeque<AudioFrame>>,
@@ -945,6 +953,102 @@ impl Mixer {
             .get(&source_id)
             .copied()
             .unwrap_or(self.max_frames_per_source)
+    }
+}
+
+pub struct MixerRuntime<S>
+where
+    S: MixerSink,
+{
+    mixer: Arc<Mutex<Mixer>>,
+    stop_requested: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    worker: Option<JoinHandle<Result<S, AudioError>>>,
+}
+
+impl<S> MixerRuntime<S>
+where
+    S: MixerSink,
+{
+    pub fn start(mixer: Mixer, sink: S, poll_interval: Duration) -> Self {
+        let mixer = Arc::new(Mutex::new(mixer));
+        Self::start_shared(mixer, sink, poll_interval)
+    }
+
+    pub fn start_shared(mixer: Arc<Mutex<Mixer>>, mut sink: S, poll_interval: Duration) -> Self {
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let running = Arc::new(AtomicBool::new(true));
+        let worker_stop = Arc::clone(&stop_requested);
+        let worker_running = Arc::clone(&running);
+        let worker_mixer = Arc::clone(&mixer);
+
+        let worker = thread::spawn(move || {
+            let result = loop {
+                if worker_stop.load(Ordering::SeqCst) {
+                    break Ok(sink);
+                }
+
+                if !sink.can_receive() {
+                    thread::sleep(poll_interval);
+                    continue;
+                }
+
+                let mixed = match worker_mixer.lock() {
+                    Ok(mut mixer) => match mixer.mix_next() {
+                        Ok(mixed) => mixed,
+                        Err(error) => break Err(error),
+                    },
+                    Err(error) => break Err(AudioError::Stream(error.to_string())),
+                };
+
+                match mixed {
+                    Some(frame) => {
+                        if let Err(error) = sink.handle_frame(frame) {
+                            break Err(error);
+                        }
+                    }
+                    None => thread::sleep(poll_interval),
+                }
+            };
+
+            worker_running.store(false, Ordering::SeqCst);
+            result
+        });
+
+        Self {
+            mixer,
+            stop_requested,
+            running,
+            worker: Some(worker),
+        }
+    }
+
+    pub fn mixer(&self) -> Arc<Mutex<Mixer>> {
+        Arc::clone(&self.mixer)
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    pub fn stop(&mut self) -> Result<Option<S>, AudioError> {
+        self.stop_requested.store(true, Ordering::SeqCst);
+        let Some(worker) = self.worker.take() else {
+            return Ok(None);
+        };
+        match worker.join() {
+            Ok(result) => result.map(Some),
+            Err(_) => Err(AudioError::Stream("mixer worker thread panicked".into())),
+        }
+    }
+}
+
+impl<S> Drop for MixerRuntime<S>
+where
+    S: MixerSink,
+{
+    fn drop(&mut self) {
+        let _ = self.stop();
     }
 }
 
@@ -1181,6 +1285,16 @@ impl CpalOutputSink {
 
     pub fn handle_frame(&mut self, frame: AudioFrame) -> Result<(), AudioError> {
         self.sink.handle_frame(frame)
+    }
+}
+
+impl MixerSink for CpalOutputSink {
+    fn can_receive(&self) -> bool {
+        CpalOutputSink::can_receive(self)
+    }
+
+    fn handle_frame(&mut self, frame: AudioFrame) -> Result<(), AudioError> {
+        CpalOutputSink::handle_frame(self, frame)
     }
 }
 
