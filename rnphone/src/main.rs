@@ -435,7 +435,12 @@ impl App {
         let Some(node) = self.node.clone() else {
             return;
         };
-        match CallAudio::start(node, link_id, self.telephone.active_profile()) {
+        match CallAudio::start(
+            node,
+            link_id,
+            self.telephone.active_profile(),
+            self.config.audio_devices.clone(),
+        ) {
             Ok(audio) => {
                 self.active_audio = Some(audio);
                 println!("Audio transport started");
@@ -480,11 +485,17 @@ struct CallAudio {
 }
 
 impl CallAudio {
-    fn start(node: Arc<RnsNode>, link_id: [u8; 16], profile: CallProfile) -> Result<Self, String> {
+    fn start(
+        node: Arc<RnsNode>,
+        link_id: [u8; 16],
+        profile: CallProfile,
+        devices: AudioDeviceConfig,
+    ) -> Result<Self, String> {
         let codec_profile = profile.codec_profile();
         let frame_ms = profile.frame_duration().as_millis();
 
         let mut input = CpalInputSource::new(CpalInputConfig {
+            preferred_device: devices.microphone.clone(),
             target_frame_ms: frame_ms,
             codec_profile: Some(codec_profile),
             skip: Duration::from_millis(75),
@@ -495,8 +506,11 @@ impl CallAudio {
         input.add_filter(BandPass::new(250.0, 8_500.0).map_err(|e| e.to_string())?);
         input.add_filter(Agc::new(-15.0, 12.0));
 
-        let mut output =
-            CpalOutputSink::new(CpalOutputConfig::default()).map_err(|e| e.to_string())?;
+        let mut output = CpalOutputSink::new(CpalOutputConfig {
+            preferred_device: devices.speaker.clone(),
+            ..CpalOutputConfig::default()
+        })
+        .map_err(|e| e.to_string())?;
         output.start().map_err(|e| e.to_string())?;
 
         let transmit_codec = CodecFactory::create(CodecSelection::Profile(codec_profile));
@@ -614,6 +628,14 @@ struct RnphoneConfig {
     allowed_callers: lxst::CallerPolicy,
     allow_phonebook_callers: bool,
     blocked_callers: HashSet<[u8; 16]>,
+    audio_devices: AudioDeviceConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AudioDeviceConfig {
+    speaker: Option<String>,
+    microphone: Option<String>,
+    ringer: Option<String>,
 }
 
 impl Default for RnphoneConfig {
@@ -623,6 +645,7 @@ impl Default for RnphoneConfig {
             allowed_callers: lxst::CallerPolicy::All,
             allow_phonebook_callers: false,
             blocked_callers: HashSet::new(),
+            audio_devices: AudioDeviceConfig::default(),
         }
     }
 }
@@ -658,6 +681,15 @@ impl RnphoneConfig {
                     for item in split_list(value) {
                         config.blocked_callers.insert(parse_hash(item)?);
                     }
+                }
+                "telephone" if key == "speaker" => {
+                    config.audio_devices.speaker = non_empty_config_value(value);
+                }
+                "telephone" if key == "microphone" => {
+                    config.audio_devices.microphone = non_empty_config_value(value);
+                }
+                "telephone" if key == "ringer" => {
+                    config.audio_devices.ringer = non_empty_config_value(value);
                 }
                 "phonebook" => {
                     let parts = split_list(value);
@@ -747,6 +779,15 @@ fn parse_allowed_callers(value: &str) -> Result<lxst::CallerPolicy, String> {
             }
             Ok(lxst::CallerPolicy::List(allowed))
         }
+    }
+}
+
+fn non_empty_config_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
     }
 }
 
@@ -869,6 +910,30 @@ mod tests {
             RnphoneConfig::parse("[phonebook]\nMary = f3e8c3359b39d36f3baff0a616a73d3e, 123\n")
                 .unwrap();
         assert_eq!(config.phonebook["Mary"].alias.as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn parses_audio_device_names() {
+        let config = RnphoneConfig::parse(
+            "[telephone]\nspeaker = Living Room Output\nmicrophone = Desk Mic\nringer = Bell Speaker\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.audio_devices.speaker.as_deref(),
+            Some("Living Room Output")
+        );
+        assert_eq!(config.audio_devices.microphone.as_deref(), Some("Desk Mic"));
+        assert_eq!(config.audio_devices.ringer.as_deref(), Some("Bell Speaker"));
+    }
+
+    #[test]
+    fn empty_audio_device_names_are_ignored() {
+        let config =
+            RnphoneConfig::parse("[telephone]\nspeaker =    \nmicrophone =\nringer =     \n")
+                .unwrap();
+
+        assert_eq!(config.audio_devices, AudioDeviceConfig::default());
     }
 
     #[test]
