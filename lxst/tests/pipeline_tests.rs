@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 use lxst::{
     AudioCodec, AudioSink, AudioSource, BufferedSink, BufferedSource, EncodedAudioFrame,
     EncodedMixerSink, Loopback, Mixer, MixerRuntime, Pipeline, PipelineError, PipelineRunner,
-    RawBitDepth, RawCodec,
+    RawBitDepth, RawCodec, ToneSource,
 };
-use lxst_core::CodecKind;
+use lxst_core::{CodecKind, CodecProfile};
 
 #[test]
 fn buffered_source_obeys_running_state() {
@@ -111,6 +111,42 @@ fn pipeline_runner_can_stop_idle_pipeline() {
     runner.stop().unwrap();
     assert!(!runner.is_running());
     assert!(frames.lock().unwrap().is_empty());
+}
+
+#[test]
+fn pipeline_runner_feeds_codec_planned_tone_source_with_backpressure() {
+    let source =
+        ToneSource::with_codec_profile(1_000.0, 2, 0.5, 7, CodecProfile::OpusVoiceLow).unwrap();
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let accepting = Arc::new(AtomicBool::new(false));
+    let sink = GatedSink {
+        accepting: Arc::clone(&accepting),
+        frames: Arc::clone(&frames),
+    };
+    let pipeline = Pipeline::new(
+        Box::new(source),
+        Box::new(RawCodec::new(RawBitDepth::Float32)),
+        Box::new(sink),
+    );
+    let mut runner = PipelineRunner::start(pipeline, Duration::from_millis(1));
+
+    thread::sleep(Duration::from_millis(20));
+    assert!(frames.lock().unwrap().is_empty());
+
+    accepting.store(true, Ordering::SeqCst);
+    wait_for(|| !frames.lock().unwrap().is_empty());
+    runner.stop().unwrap();
+
+    let frames = frames.lock().unwrap();
+    assert_eq!(frames[0].codec, CodecKind::Raw);
+    assert_eq!(frames[0].samplerate, 8_000);
+    assert_eq!(frames[0].channels, 1);
+
+    let mut decoder = RawCodec::new(RawBitDepth::Float32);
+    let decoded = decoder
+        .decode(&frames[0].payload, frames[0].samplerate)
+        .unwrap();
+    assert_eq!(decoded.frame_count(), 40);
 }
 
 #[test]
