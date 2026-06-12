@@ -706,6 +706,21 @@ fn telephone_follows_basic_incoming_flow() {
 }
 
 #[test]
+fn telephone_cannot_establish_unanswered_incoming_call() {
+    let caller = [0x17; 16];
+    let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
+
+    assert!(telephone.begin_incoming_call(caller));
+    assert!(!telephone.establish());
+
+    assert_eq!(telephone.state(), CallState::Ringing);
+    let events: Vec<_> = rx.try_iter().collect();
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, lxst::telephony::CallEvent::CallEstablished { .. })));
+}
+
+#[test]
 fn telephone_idle_hangup_is_noop() {
     let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
 

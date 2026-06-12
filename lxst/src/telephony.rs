@@ -370,10 +370,7 @@ impl Telephone {
     }
 
     pub fn establish(&mut self) -> bool {
-        if !matches!(
-            self.state,
-            CallState::Connecting | CallState::Calling | CallState::Ringing
-        ) {
+        if !matches!(self.state, CallState::Connecting | CallState::Calling) {
             return false;
         }
         self.call_deadline = None;
