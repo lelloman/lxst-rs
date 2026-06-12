@@ -406,7 +406,7 @@ where
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LineSourceFramePlan {
+pub struct AudioFramePlan {
     pub requested_frame_ms: f32,
     pub target_frame_ms: f32,
     pub samplerate: u32,
@@ -420,7 +420,7 @@ pub fn plan_line_source_frame(
     codec_profile: Option<CodecProfile>,
     samplerate: u32,
     channels: u8,
-) -> Result<LineSourceFramePlan, AudioError> {
+) -> Result<AudioFramePlan, AudioError> {
     AudioFrame::silence(samplerate, channels, 0)?;
     let mut target_frame_ms = requested_frame_ms.max(1.0);
 
@@ -458,7 +458,7 @@ pub fn plan_line_source_frame(
 
     let frame_count = ((samplerate as f32 * target_frame_ms) / 1000.0).ceil() as usize;
     let sample_count = frame_count * channels as usize;
-    Ok(LineSourceFramePlan {
+    Ok(AudioFramePlan {
         requested_frame_ms,
         target_frame_ms,
         samplerate,
@@ -466,6 +466,18 @@ pub fn plan_line_source_frame(
         frame_count,
         sample_count,
     })
+}
+
+pub type LineSourceFramePlan = AudioFramePlan;
+pub type MixerFramePlan = AudioFramePlan;
+
+pub fn plan_mixer_frame(
+    requested_frame_ms: f32,
+    codec_profile: Option<CodecProfile>,
+    samplerate: u32,
+    channels: u8,
+) -> Result<MixerFramePlan, AudioError> {
+    plan_line_source_frame(requested_frame_ms, codec_profile, samplerate, channels)
 }
 
 #[derive(Debug, Clone, Copy)]

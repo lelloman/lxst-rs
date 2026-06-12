@@ -1,9 +1,10 @@
 use lxst::audio::AudioFilter;
 use lxst::{
-    plan_line_source_frame, Agc, AudioCodec, AudioDeviceKind, AudioFrame, AudioSource, CallProfile,
-    CallState, CallerPolicy, Codec2Codec, CodecError, LinePlayback, LineSourceProcessor, Mixer,
-    MixerRuntime, MixerSink, OpusCodec, QueuedLineSink, QueuedLineSinkConfig, RawBitDepth,
-    RawCodec, Signal, SignalCode, Telephone, TelephoneConfig, ToneSource,
+    plan_line_source_frame, plan_mixer_frame, Agc, AudioCodec, AudioDeviceKind, AudioFrame,
+    AudioSource, CallProfile, CallState, CallerPolicy, Codec2Codec, CodecError, LinePlayback,
+    LineSourceProcessor, Mixer, MixerRuntime, MixerSink, OpusCodec, QueuedLineSink,
+    QueuedLineSinkConfig, RawBitDepth, RawCodec, Signal, SignalCode, Telephone, TelephoneConfig,
+    ToneSource,
 };
 use lxst_core::CodecProfile;
 use std::sync::{
@@ -373,6 +374,28 @@ fn line_source_frame_plan_leaves_unconstrained_profiles_unchanged() {
     assert_eq!(plan.target_frame_ms, 80.0);
     assert_eq!(plan.frame_count, 3_840);
     assert_eq!(plan.sample_count, 7_680);
+}
+
+#[test]
+fn mixer_frame_plan_reuses_codec_target_sizing() {
+    let opus = plan_mixer_frame(7.0, Some(CodecProfile::OpusVoiceLow), 8_000, 1).unwrap();
+    assert_eq!(opus.requested_frame_ms, 7.0);
+    assert_eq!(opus.target_frame_ms, 5.0);
+    assert_eq!(opus.frame_count, 40);
+    assert_eq!(opus.sample_count, 40);
+
+    let codec2 = plan_mixer_frame(45.0, Some(CodecProfile::Codec2_3200), 8_000, 1).unwrap();
+    assert_eq!(codec2.target_frame_ms, 80.0);
+    assert_eq!(codec2.frame_count, 640);
+}
+
+#[test]
+fn mixer_frame_plan_keeps_raw_output_unconstrained() {
+    let plan = plan_mixer_frame(33.0, None, 48_000, 2).unwrap();
+
+    assert_eq!(plan.target_frame_ms, 33.0);
+    assert_eq!(plan.frame_count, 1_584);
+    assert_eq!(plan.sample_count, 3_168);
 }
 
 #[test]
