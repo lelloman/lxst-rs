@@ -706,6 +706,40 @@ fn telephone_follows_basic_incoming_flow() {
 }
 
 #[test]
+fn telephone_idle_hangup_is_noop() {
+    let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
+
+    telephone.hangup();
+
+    assert_eq!(telephone.state(), CallState::Available);
+    assert!(rx.try_iter().next().is_none());
+}
+
+#[test]
+fn telephone_hangup_rejects_ringing_incoming_call() {
+    let caller = [0x12; 16];
+    let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
+
+    assert!(telephone.begin_incoming_call(caller));
+    telephone.hangup();
+
+    assert_eq!(telephone.state(), CallState::Available);
+    let events: Vec<_> = rx.try_iter().collect();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        lxst::telephony::CallEvent::Rejected {
+            identity_hash: Some(identity)
+        } if *identity == caller
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        lxst::telephony::CallEvent::CallEnded {
+            identity_hash: Some(identity)
+        } if *identity == caller
+    )));
+}
+
+#[test]
 fn telephone_applies_profile_signalling() {
     let (mut telephone, _rx) = Telephone::new(TelephoneConfig::default());
     telephone.apply_signal(Signal::PreferredProfile(CallProfile::LowLatency));

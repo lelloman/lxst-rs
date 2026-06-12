@@ -73,6 +73,12 @@ pub enum CallState {
     Terminating,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallDirection {
+    Incoming,
+    Outgoing,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum CallEvent {
     StateChanged(CallState),
@@ -110,6 +116,7 @@ pub struct Telephone {
     config: TelephoneConfig,
     state: CallState,
     active_identity: Option<[u8; 16]>,
+    active_direction: Option<CallDirection>,
     active_profile: CallProfile,
     external_busy: bool,
     low_latency_output: bool,
@@ -155,6 +162,7 @@ impl Telephone {
                 config,
                 state: CallState::Available,
                 active_identity: None,
+                active_direction: None,
                 active_profile,
                 external_busy: false,
                 low_latency_output: false,
@@ -325,6 +333,7 @@ impl Telephone {
         }
         self.select_call_profile(profile);
         self.active_identity = Some(identity_hash);
+        self.active_direction = Some(CallDirection::Outgoing);
         self.call_deadline = Some(Instant::now() + self.config.wait_time);
         self.auto_answer_deadline = None;
         self.set_state(CallState::Calling);
@@ -339,6 +348,7 @@ impl Telephone {
             return false;
         }
         self.active_identity = Some(identity_hash);
+        self.active_direction = Some(CallDirection::Incoming);
         self.call_deadline = Some(Instant::now() + self.config.ring_time);
         self.auto_answer_deadline = self
             .config
@@ -378,12 +388,22 @@ impl Telephone {
     }
 
     pub fn hangup(&mut self) {
-        let identity_hash = self.clear_active_call();
-        self.set_state(CallState::Available);
-        let _ = self.events.send(CallEvent::CallEnded { identity_hash });
+        if !self.has_active_call() {
+            return;
+        }
+        if self.active_direction == Some(CallDirection::Incoming)
+            && self.state == CallState::Ringing
+        {
+            self.reject();
+            return;
+        }
+        self.end_call();
     }
 
     pub fn reject(&mut self) {
+        if !self.has_active_call() {
+            return;
+        }
         let identity_hash = self.clear_active_call();
         self.set_state(CallState::Available);
         let _ = self.events.send(CallEvent::Rejected { identity_hash });
@@ -409,7 +429,7 @@ impl Telephone {
                 identity_hash,
                 state,
             });
-            self.hangup();
+            self.end_call();
         }
     }
 
@@ -449,9 +469,20 @@ impl Telephone {
         }
     }
 
+    fn has_active_call(&self) -> bool {
+        self.active_identity.is_some() || self.state != CallState::Available
+    }
+
+    fn end_call(&mut self) {
+        let identity_hash = self.clear_active_call();
+        self.set_state(CallState::Available);
+        let _ = self.events.send(CallEvent::CallEnded { identity_hash });
+    }
+
     fn clear_active_call(&mut self) -> Option<[u8; 16]> {
         self.call_deadline = None;
         self.auto_answer_deadline = None;
+        self.active_direction = None;
         self.clear_mutes();
         self.active_identity.take()
     }
