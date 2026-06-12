@@ -1,10 +1,14 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use lxst::{
-    AudioCodec, AudioSink, AudioSource, BufferedSink, BufferedSource, EncodedAudioFrame, Loopback,
-    Pipeline, PipelineError, PipelineRunner, RawBitDepth, RawCodec,
+    AudioCodec, AudioSink, AudioSource, BufferedSink, BufferedSource, EncodedAudioFrame,
+    EncodedMixerSink, Loopback, Mixer, MixerRuntime, Pipeline, PipelineError, PipelineRunner,
+    RawBitDepth, RawCodec,
 };
 use lxst_core::CodecKind;
 
@@ -152,12 +156,113 @@ fn loopback_drops_oldest_frame_when_full() {
     assert!(source.next_frame().unwrap().is_none());
 }
 
+#[test]
+fn encoded_mixer_sink_encodes_mixed_frames() {
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let sink = CollectingSink {
+        frames: Arc::clone(&frames),
+    };
+    let mut sink = EncodedMixerSink::new(Box::new(RawCodec::new(RawBitDepth::Float32)), sink);
+
+    lxst::MixerSink::handle_frame(
+        &mut sink,
+        lxst::AudioFrame::new(8_000, 1, vec![0.25, -0.5]).unwrap(),
+    )
+    .unwrap();
+
+    let frames = frames.lock().unwrap();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].codec, CodecKind::Raw);
+    assert_eq!(frames[0].samplerate, 8_000);
+    assert_eq!(frames[0].channels, 1);
+
+    let mut decoder = RawCodec::new(RawBitDepth::Float32);
+    let decoded = decoder
+        .decode(&frames[0].payload, frames[0].samplerate)
+        .unwrap();
+    assert_eq!(decoded.samples(), &[0.25, -0.5]);
+}
+
+#[test]
+fn mixer_runtime_can_feed_encoded_sink() {
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let sink = CollectingSink {
+        frames: Arc::clone(&frames),
+    };
+    let sink = EncodedMixerSink::new(Box::new(RawCodec::new(RawBitDepth::Float32)), sink);
+    let mut runtime = MixerRuntime::start(Mixer::default(), sink, Duration::from_millis(1));
+    let mixer = runtime.mixer();
+
+    {
+        let mut mixer = mixer.lock().unwrap();
+        mixer.push(1, lxst::AudioFrame::new(8_000, 1, vec![0.25]).unwrap());
+        mixer.push(2, lxst::AudioFrame::new(8_000, 1, vec![0.5]).unwrap());
+    }
+
+    wait_for(|| frames.lock().unwrap().len() == 1);
+    runtime.stop().unwrap();
+
+    let frames = frames.lock().unwrap();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].codec, CodecKind::Raw);
+    let mut decoder = RawCodec::new(RawBitDepth::Float32);
+    let decoded = decoder
+        .decode(&frames[0].payload, frames[0].samplerate)
+        .unwrap();
+    assert_eq!(decoded.samples(), &[0.75]);
+}
+
+#[test]
+fn encoded_mixer_sink_delegates_backpressure() {
+    let accepting = Arc::new(AtomicBool::new(false));
+    let sink = GatedSink {
+        accepting: Arc::clone(&accepting),
+        frames: Arc::new(Mutex::new(Vec::new())),
+    };
+    let mut sink = EncodedMixerSink::new(Box::new(RawCodec::new(RawBitDepth::Float32)), sink);
+
+    assert!(!lxst::MixerSink::can_receive(&sink));
+    assert!(lxst::MixerSink::handle_frame(
+        &mut sink,
+        lxst::AudioFrame::new(8_000, 1, vec![0.25]).unwrap(),
+    )
+    .is_err());
+
+    accepting.store(true, Ordering::SeqCst);
+    assert!(lxst::MixerSink::can_receive(&sink));
+    lxst::MixerSink::handle_frame(
+        &mut sink,
+        lxst::AudioFrame::new(8_000, 1, vec![0.25]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(sink.sink().frames.lock().unwrap().len(), 1);
+}
+
 struct CollectingSink {
     frames: Arc<Mutex<Vec<EncodedAudioFrame>>>,
 }
 
 impl AudioSink for CollectingSink {
     fn handle_frame(&mut self, frame: EncodedAudioFrame) -> Result<(), PipelineError> {
+        self.frames.lock().unwrap().push(frame);
+        Ok(())
+    }
+}
+
+struct GatedSink {
+    accepting: Arc<AtomicBool>,
+    frames: Arc<Mutex<Vec<EncodedAudioFrame>>>,
+}
+
+impl AudioSink for GatedSink {
+    fn can_receive(&self) -> bool {
+        self.accepting.load(Ordering::SeqCst)
+    }
+
+    fn handle_frame(&mut self, frame: EncodedAudioFrame) -> Result<(), PipelineError> {
+        if !self.can_receive() {
+            return Err(PipelineError::SinkFull);
+        }
         self.frames.lock().unwrap().push(frame);
         Ok(())
     }

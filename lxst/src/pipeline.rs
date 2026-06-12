@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use lxst_core::CodecKind;
 
-use crate::audio::{AudioError, AudioFrame};
+use crate::audio::{AudioError, AudioFrame, MixerSink};
 use crate::codec::{AudioCodec, CodecError};
 use crate::network::NetworkError;
 
@@ -153,6 +153,59 @@ impl AudioSink for Loopback {
         inner.channels = decoded.channels();
         inner.frames.push_back(decoded);
         Ok(())
+    }
+}
+
+pub struct EncodedMixerSink<S>
+where
+    S: AudioSink,
+{
+    codec: Box<dyn AudioCodec>,
+    sink: S,
+}
+
+impl<S> EncodedMixerSink<S>
+where
+    S: AudioSink,
+{
+    pub fn new(codec: Box<dyn AudioCodec>, sink: S) -> Self {
+        Self { codec, sink }
+    }
+
+    pub fn sink(&self) -> &S {
+        &self.sink
+    }
+
+    pub fn sink_mut(&mut self) -> &mut S {
+        &mut self.sink
+    }
+
+    pub fn into_sink(self) -> S {
+        self.sink
+    }
+}
+
+impl<S> MixerSink for EncodedMixerSink<S>
+where
+    S: AudioSink + 'static,
+{
+    fn can_receive(&self) -> bool {
+        self.sink.can_receive()
+    }
+
+    fn handle_frame(&mut self, frame: AudioFrame) -> Result<(), AudioError> {
+        let encoded = EncodedAudioFrame {
+            codec: self.codec.kind(),
+            samplerate: frame.samplerate(),
+            channels: frame.channels(),
+            payload: self
+                .codec
+                .encode(&frame)
+                .map_err(|err| AudioError::Stream(err.to_string()))?,
+        };
+        self.sink
+            .handle_frame(encoded)
+            .map_err(|err| AudioError::Stream(err.to_string()))
     }
 }
 
