@@ -435,6 +435,9 @@ impl Telephone {
 
     pub fn apply_signal(&mut self, signal: Signal) {
         let _ = self.events.send(CallEvent::SignalReceived(signal));
+        if self.should_ignore_status_signal(signal) {
+            return;
+        }
         match signal {
             Signal::Code(SignalCode::Busy) => {
                 let identity_hash = self.clear_active_call();
@@ -467,6 +470,15 @@ impl Telephone {
             self.state = state;
             let _ = self.events.send(CallEvent::StateChanged(state));
         }
+    }
+
+    fn should_ignore_status_signal(&self, signal: Signal) -> bool {
+        if !matches!(signal, Signal::Code(_)) {
+            return false;
+        }
+        !self.has_active_call()
+            || (self.active_direction == Some(CallDirection::Incoming)
+                && self.state == CallState::Ringing)
     }
 
     fn has_active_call(&self) -> bool {

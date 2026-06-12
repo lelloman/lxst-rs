@@ -747,6 +747,42 @@ fn telephone_applies_profile_signalling() {
 }
 
 #[test]
+fn telephone_ignores_idle_status_signalling() {
+    let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
+
+    telephone.apply_signal(Signal::Code(SignalCode::Available));
+    telephone.apply_signal(Signal::Code(SignalCode::Established));
+
+    assert_eq!(telephone.state(), CallState::Available);
+    let events: Vec<_> = rx.try_iter().collect();
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        lxst::telephony::CallEvent::StateChanged(_)
+            | lxst::telephony::CallEvent::CallEstablished { .. }
+            | lxst::telephony::CallEvent::CallEnded { .. }
+    )));
+}
+
+#[test]
+fn telephone_ignores_status_signalling_before_incoming_answer() {
+    let caller = [0x13; 16];
+    let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
+
+    assert!(telephone.begin_incoming_call(caller));
+    telephone.apply_signal(Signal::Code(SignalCode::Established));
+    telephone.apply_signal(Signal::Code(SignalCode::Busy));
+
+    assert_eq!(telephone.state(), CallState::Ringing);
+    let events: Vec<_> = rx.try_iter().collect();
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        lxst::telephony::CallEvent::CallEstablished { .. }
+            | lxst::telephony::CallEvent::Busy { .. }
+            | lxst::telephony::CallEvent::CallEnded { .. }
+    )));
+}
+
+#[test]
 fn telephone_selects_outgoing_profile_preference() {
     let remote = [0x22; 16];
     let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
