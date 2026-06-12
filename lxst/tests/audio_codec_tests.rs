@@ -78,6 +78,31 @@ fn opus_codec_round_trips_voice_frame() {
 }
 
 #[test]
+fn codec_paths_share_audio_frame_conversion_shape() {
+    let samples: Vec<f32> = (0..960)
+        .flat_map(|n| {
+            let sample = ((n as f32 / 48_000.0) * 180.0 * std::f32::consts::TAU).sin() * 0.2;
+            [sample, -sample]
+        })
+        .collect();
+    let frame = AudioFrame::new(48_000, 2, samples).unwrap();
+
+    let mut opus = OpusCodec::new(CodecProfile::OpusVoiceLow);
+    let opus_encoded = opus.encode(&frame).unwrap();
+    let opus_decoded = opus.decode(&opus_encoded, 8_000).unwrap();
+    assert_eq!(opus_decoded.samplerate(), 8_000);
+    assert_eq!(opus_decoded.channels(), 1);
+    assert_eq!(opus_decoded.frame_count(), 160);
+
+    let mut codec2 = Codec2Codec::new(CodecProfile::Codec2_3200);
+    let codec2_encoded = codec2.encode(&frame).unwrap();
+    let codec2_decoded = codec2.decode(&codec2_encoded, 8_000).unwrap();
+    assert_eq!(codec2_decoded.samplerate(), 8_000);
+    assert_eq!(codec2_decoded.channels(), 1);
+    assert_eq!(codec2_decoded.frame_count(), 160);
+}
+
+#[test]
 fn opus_codec_resamples_and_normalizes_channels() {
     let samples: Vec<f32> = (0..960)
         .flat_map(|n| {

@@ -207,14 +207,10 @@ impl AudioCodec for OpusCodec {
 
     fn encode(&mut self, frame: &AudioFrame) -> Result<Vec<u8>, CodecError> {
         let info = self.info()?;
-        let normalized = normalize_channels(frame.samples(), frame.channels(), info.channels)?;
-        let resampled = resample_linear(
-            &normalized,
-            info.channels,
-            frame.samplerate(),
-            info.samplerate,
-        )?;
-        let sample_count = resampled.len() / info.channels as usize;
+        let converted = frame
+            .with_channels(info.channels)?
+            .resampled(info.samplerate)?;
+        let sample_count = converted.frame_count();
         let frame_duration_tenths = valid_opus_frame_duration_tenths(sample_count, info.samplerate)
             .ok_or(CodecError::InvalidFrameDuration {
                 sample_count,
@@ -222,8 +218,10 @@ impl AudioCodec for OpusCodec {
             })?;
         let max_frame_bytes =
             max_bytes_per_frame_tenths(info.bitrate_ceiling, frame_duration_tenths).max(1);
-        let input: Vec<i16> = resampled
-            .into_iter()
+        let input: Vec<i16> = converted
+            .samples()
+            .iter()
+            .copied()
             .map(|sample| (sample.clamp(-1.0, 1.0) * 32767.0) as i16)
             .collect();
         self.encoder(info)?
@@ -302,10 +300,11 @@ impl Codec2Codec {
         mode_header: u8,
         mode: c_int,
     ) -> Result<Vec<u8>, CodecError> {
-        let normalized = normalize_channels(frame.samples(), frame.channels(), 1)?;
-        let resampled = resample_linear(&normalized, 1, frame.samplerate(), 8_000)?;
-        let input: Vec<i16> = resampled
-            .into_iter()
+        let converted = frame.with_channels(1)?.resampled(8_000)?;
+        let input: Vec<i16> = converted
+            .samples()
+            .iter()
+            .copied()
             .map(|sample| (sample.clamp(-1.0, 1.0) * 32767.0) as i16)
             .collect();
         let codec = self.system_codec(mode)?;
@@ -342,9 +341,12 @@ impl Codec2Codec {
             .into_iter()
             .map(|sample| sample as f32 / 32767.0)
             .collect();
-        let samplerate = if samplerate == 0 { 8_000 } else { samplerate };
-        let samples = resample_linear(&samples, 1, 8_000, samplerate)?;
-        Ok(AudioFrame::new(samplerate, 1, samples)?)
+        let decoded = AudioFrame::new(8_000, 1, samples)?;
+        if samplerate == 0 {
+            Ok(decoded)
+        } else {
+            Ok(decoded.resampled(samplerate)?)
+        }
     }
 }
 
@@ -359,10 +361,11 @@ impl AudioCodec for Codec2Codec {
         }
         let mode = codec2_mode(self.profile)?;
         let mode_header = codec2_mode_header(self.profile)?;
-        let normalized = normalize_channels(frame.samples(), frame.channels(), 1)?;
-        let resampled = resample_linear(&normalized, 1, frame.samplerate(), 8_000)?;
-        let input: Vec<i16> = resampled
-            .into_iter()
+        let converted = frame.with_channels(1)?.resampled(8_000)?;
+        let input: Vec<i16> = converted
+            .samples()
+            .iter()
+            .copied()
             .map(|sample| (sample.clamp(-1.0, 1.0) * 32767.0) as i16)
             .collect();
         let codec = self.codec(mode);
@@ -399,9 +402,12 @@ impl AudioCodec for Codec2Codec {
             .into_iter()
             .map(|sample| sample as f32 / 32767.0)
             .collect();
-        let samplerate = if samplerate == 0 { 8_000 } else { samplerate };
-        let samples = resample_linear(&samples, 1, 8_000, samplerate)?;
-        Ok(AudioFrame::new(samplerate, 1, samples)?)
+        let decoded = AudioFrame::new(8_000, 1, samples)?;
+        if samplerate == 0 {
+            Ok(decoded)
+        } else {
+            Ok(decoded.resampled(samplerate)?)
+        }
     }
 }
 
@@ -596,69 +602,6 @@ fn validate_opus_samplerate(samplerate: u32) -> Result<(), CodecError> {
         8_000 | 12_000 | 16_000 | 24_000 | 48_000 => Ok(()),
         other => Err(CodecError::InvalidOpusSamplerate(other)),
     }
-}
-
-fn normalize_channels(
-    samples: &[f32],
-    input_channels: u8,
-    output_channels: u8,
-) -> Result<Vec<f32>, CodecError> {
-    if input_channels == 0 {
-        return Err(CodecError::InvalidOpusChannels(input_channels));
-    }
-    opus_channels(output_channels)?;
-    let input_channels = input_channels as usize;
-    let output_channels = output_channels as usize;
-    let frames = samples.len() / input_channels;
-    let mut normalized = Vec::with_capacity(frames * output_channels);
-    for frame in 0..frames {
-        let base = frame * input_channels;
-        for channel in 0..output_channels {
-            let source_channel = channel.min(input_channels - 1);
-            normalized.push(samples[base + source_channel]);
-        }
-    }
-    Ok(normalized)
-}
-
-fn resample_linear(
-    samples: &[f32],
-    channels: u8,
-    input_rate: u32,
-    output_rate: u32,
-) -> Result<Vec<f32>, CodecError> {
-    if input_rate == 0 {
-        return Err(CodecError::Audio(AudioError::InvalidSamplerate(input_rate)));
-    }
-    if output_rate == 0 {
-        return Err(CodecError::Audio(AudioError::InvalidSamplerate(
-            output_rate,
-        )));
-    }
-    if input_rate == output_rate {
-        return Ok(samples.to_vec());
-    }
-    let channels = channels as usize;
-    if samples.is_empty() {
-        return Ok(Vec::new());
-    }
-    let input_frames = samples.len() / channels;
-    let output_frames =
-        ((input_frames as u64 * output_rate as u64) + input_rate as u64 / 2) / input_rate as u64;
-    let output_frames = output_frames.max(1) as usize;
-    let mut out = Vec::with_capacity(output_frames * channels);
-    for out_frame in 0..output_frames {
-        let position = out_frame as f64 * input_rate as f64 / output_rate as f64;
-        let left = position.floor() as usize;
-        let right = (left + 1).min(input_frames - 1);
-        let frac = (position - left as f64) as f32;
-        for channel in 0..channels {
-            let a = samples[left * channels + channel];
-            let b = samples[right * channels + channel];
-            out.push(a + (b - a) * frac);
-        }
-    }
-    Ok(out)
 }
 
 fn valid_opus_frame_duration_tenths(sample_count: usize, samplerate: u32) -> Option<u32> {
