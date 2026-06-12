@@ -887,6 +887,17 @@ impl Mixer {
         self.muted = muted;
     }
 
+    pub fn can_receive(&self, source_id: u64) -> bool {
+        self.queued_frames(source_id) < self.source_frame_limit(source_id)
+    }
+
+    pub fn queued_frames(&self, source_id: u64) -> usize {
+        self.queues
+            .get(&source_id)
+            .map(VecDeque::len)
+            .unwrap_or_default()
+    }
+
     pub fn push(&mut self, source_id: u64, frame: AudioFrame) {
         let max_frames = self.source_frame_limit(source_id);
         let queue = self

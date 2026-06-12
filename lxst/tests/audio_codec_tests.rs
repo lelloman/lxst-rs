@@ -230,6 +230,23 @@ fn mixer_sums_and_clips_frames() {
 }
 
 #[test]
+fn mixer_reports_source_backpressure() {
+    let mut mixer = Mixer::default();
+    mixer.set_source_max_frames(1, 2);
+
+    assert!(mixer.can_receive(1));
+    assert!(mixer.can_receive(42));
+    assert_eq!(mixer.queued_frames(1), 0);
+
+    mixer.push(1, AudioFrame::new(8_000, 1, vec![0.2]).unwrap());
+    mixer.push(1, AudioFrame::new(8_000, 1, vec![0.4]).unwrap());
+
+    assert_eq!(mixer.queued_frames(1), 2);
+    assert!(!mixer.can_receive(1));
+    assert!(mixer.can_receive(2));
+}
+
+#[test]
 fn mixer_limits_frames_per_source() {
     let mut mixer = Mixer::default();
     mixer.set_source_max_frames(1, 2);
@@ -240,6 +257,21 @@ fn mixer_limits_frames_per_source() {
     assert_eq!(mixer.mix_next().unwrap().unwrap().samples(), &[0.4]);
     assert_eq!(mixer.mix_next().unwrap().unwrap().samples(), &[0.6]);
     assert!(mixer.mix_next().unwrap().is_none());
+}
+
+#[test]
+fn mixer_tightening_source_limit_updates_backpressure() {
+    let mut mixer = Mixer::default();
+    mixer.set_source_max_frames(1, 3);
+    mixer.push(1, AudioFrame::new(8_000, 1, vec![0.2]).unwrap());
+    mixer.push(1, AudioFrame::new(8_000, 1, vec![0.4]).unwrap());
+
+    assert!(mixer.can_receive(1));
+
+    mixer.set_source_max_frames(1, 1);
+
+    assert_eq!(mixer.queued_frames(1), 1);
+    assert!(!mixer.can_receive(1));
 }
 
 #[test]
