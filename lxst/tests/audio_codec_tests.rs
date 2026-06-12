@@ -596,6 +596,30 @@ fn tone_source_obeys_audio_source_lifecycle() {
 }
 
 #[test]
+fn tone_source_with_codec_profile_uses_codec_frame_plan() {
+    let mut tone =
+        ToneSource::with_codec_profile(1_000.0, 2, 0.5, 7, CodecProfile::OpusVoiceLow).unwrap();
+
+    tone.start();
+    let frame = AudioSource::next_frame(&mut tone).unwrap().unwrap();
+    assert_eq!(frame.samplerate(), 8_000);
+    assert_eq!(frame.channels(), 1);
+    assert_eq!(frame.frame_count(), 40);
+}
+
+#[test]
+fn tone_source_with_codec2_profile_quantizes_frame_time() {
+    let mut tone =
+        ToneSource::with_codec_profile(1_000.0, 2, 0.5, 45, CodecProfile::Codec2_3200).unwrap();
+
+    tone.start();
+    let frame = AudioSource::next_frame(&mut tone).unwrap().unwrap();
+    assert_eq!(frame.samplerate(), 8_000);
+    assert_eq!(frame.channels(), 1);
+    assert_eq!(frame.frame_count(), 640);
+}
+
+#[test]
 fn tone_source_eases_out_before_stopping() {
     let mut tone = ToneSource::with_frame_ms(1_000.0, 8_000, 1, 0.5, 20);
     tone.start();

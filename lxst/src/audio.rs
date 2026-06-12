@@ -1382,6 +1382,55 @@ impl ToneSource {
         gain: f32,
         target_frame_ms: u16,
     ) -> Self {
+        let samples_per_frame =
+            ((samplerate as u64 * target_frame_ms.max(1) as u64).div_ceil(1000)) as usize;
+        Self::with_samples_per_frame(frequency, samplerate, channels, gain, samples_per_frame)
+    }
+
+    pub fn with_frame_plan(frequency: f32, gain: f32, plan: AudioFramePlan) -> Self {
+        Self::with_samples_per_frame(
+            frequency,
+            plan.samplerate,
+            plan.channels,
+            gain,
+            plan.frame_count,
+        )
+    }
+
+    pub fn with_codec_profile(
+        frequency: f32,
+        channels: u8,
+        gain: f32,
+        target_frame_ms: u16,
+        codec_profile: CodecProfile,
+    ) -> Result<Self, AudioError> {
+        let info = codec_profile.info();
+        let samplerate = if info.samplerate == 0 {
+            48_000
+        } else {
+            info.samplerate
+        };
+        let channels = if info.channels == 0 {
+            channels
+        } else {
+            info.channels
+        };
+        let plan = plan_line_source_frame(
+            target_frame_ms as f32,
+            Some(codec_profile),
+            samplerate,
+            channels,
+        )?;
+        Ok(Self::with_frame_plan(frequency, gain, plan))
+    }
+
+    fn with_samples_per_frame(
+        frequency: f32,
+        samplerate: u32,
+        channels: u8,
+        gain: f32,
+        samples_per_frame: usize,
+    ) -> Self {
         let ease_time = Duration::from_millis(20);
         let ease_samples = duration_samples(ease_time, samplerate, 1).max(1);
         Self {
@@ -1392,8 +1441,7 @@ impl ToneSource {
             gain,
             target_gain: gain,
             gain_step: 0.02 / ease_samples as f32,
-            samples_per_frame: ((samplerate as u64 * target_frame_ms.max(1) as u64).div_ceil(1000))
-                as usize,
+            samples_per_frame,
             ease: true,
             ease_gain: 0.0,
             ease_step: 1.0 / ease_samples as f32,
