@@ -114,7 +114,7 @@ impl Args {
                 "-s" | "--service" => parsed.service = true,
                 "--systemd" => parsed.systemd = true,
                 "--version" => parsed.version = true,
-                "-v" => parsed.verbose = parsed.verbose.saturating_add(1),
+                "-v" | "--verbose" => parsed.verbose = parsed.verbose.saturating_add(1),
                 "-h" | "--help" => parsed.help = true,
                 other if other.starts_with('-') && other.chars().all(|c| c == '-' || c == 'v') => {
                     parsed.verbose = parsed
@@ -934,6 +934,12 @@ mod tests {
                 .unwrap();
 
         assert_eq!(config.audio_devices, AudioDeviceConfig::default());
+    }
+
+    #[test]
+    fn parses_long_verbose_flag() {
+        let args = Args::parse(vec!["--verbose".to_string(), "-vv".to_string()]).unwrap();
+        assert_eq!(args.verbose, 3);
     }
 
     #[test]
