@@ -1094,6 +1094,36 @@ fn telephone_hangup_resets_mute_state() {
 }
 
 #[test]
+fn telephone_hangup_resets_active_profile_to_default() {
+    let remote = [0x26; 16];
+    let (mut telephone, _rx) = Telephone::new(TelephoneConfig::default());
+
+    assert!(telephone.begin_outgoing_call(remote));
+    telephone.apply_signal(Signal::PreferredProfile(CallProfile::UltraLowLatency));
+    assert_eq!(telephone.active_profile(), CallProfile::UltraLowLatency);
+
+    telephone.hangup();
+
+    assert_eq!(telephone.state(), CallState::Available);
+    assert_eq!(telephone.active_profile(), CallProfile::DEFAULT);
+}
+
+#[test]
+fn telephone_reject_resets_active_profile_to_default() {
+    let caller = [0x27; 16];
+    let (mut telephone, _rx) = Telephone::new(TelephoneConfig::default());
+
+    assert!(telephone.begin_incoming_call(caller));
+    telephone.apply_signal(Signal::PreferredProfile(CallProfile::LowLatency));
+    assert_eq!(telephone.active_profile(), CallProfile::LowLatency);
+
+    telephone.reject();
+
+    assert_eq!(telephone.state(), CallState::Available);
+    assert_eq!(telephone.active_profile(), CallProfile::DEFAULT);
+}
+
+#[test]
 fn caller_policy_list_allows_only_members() {
     let allowed = [0x01; 16];
     let denied = [0x02; 16];

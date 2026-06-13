@@ -494,6 +494,7 @@ impl Telephone {
         self.call_deadline = None;
         self.auto_answer_deadline = None;
         self.active_direction = None;
+        self.active_profile = self.config.profile;
         self.clear_mutes();
         self.active_identity.take()
     }
