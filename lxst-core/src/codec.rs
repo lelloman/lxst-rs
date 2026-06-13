@@ -82,7 +82,11 @@ pub enum CodecProfile {
     OpusAudioHigh,
     OpusAudioMax,
     Codec2_700C,
+    Codec2_1200,
+    Codec2_1300,
+    Codec2_1400,
     Codec2_1600,
+    Codec2_2400,
     Codec2_3200,
     Raw,
 }
@@ -132,7 +136,13 @@ impl CodecProfile {
             Self::OpusAudioMax => {
                 CodecProfileInfo::opus(self, 2, 48_000, 128_000, OpusApplication::Audio)
             }
-            Self::Codec2_700C | Self::Codec2_1600 | Self::Codec2_3200 => CodecProfileInfo {
+            Self::Codec2_700C
+            | Self::Codec2_1200
+            | Self::Codec2_1300
+            | Self::Codec2_1400
+            | Self::Codec2_1600
+            | Self::Codec2_2400
+            | Self::Codec2_3200 => CodecProfileInfo {
                 profile: self,
                 channels: 1,
                 samplerate: 8_000,

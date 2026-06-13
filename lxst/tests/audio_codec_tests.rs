@@ -1,10 +1,10 @@
 use lxst::audio::AudioFilter;
 use lxst::{
     plan_line_source_frame, plan_mixer_frame, Agc, AudioCodec, AudioDeviceKind, AudioFrame,
-    AudioSource, CallProfile, CallState, CallerPolicy, Codec2Codec, CodecError, LinePlayback,
-    LineSourceProcessor, Mixer, MixerRuntime, MixerSink, OpusCodec, QueuedLineSink,
-    QueuedLineSinkConfig, RawBitDepth, RawCodec, Signal, SignalCode, Telephone, TelephoneConfig,
-    ToneSource,
+    AudioSource, CallProfile, CallState, CallerPolicy, Codec2Codec, CodecError, CodecFactory,
+    CodecSelection, LinePlayback, LineSourceProcessor, Mixer, MixerRuntime, MixerSink, OpusCodec,
+    QueuedLineSink, QueuedLineSinkConfig, RawBitDepth, RawCodec, Signal, SignalCode, Telephone,
+    TelephoneConfig, ToneSource,
 };
 use lxst_core::CodecProfile;
 use std::sync::{
@@ -191,6 +191,48 @@ fn codec2_1600_round_trips_one_frame_with_python_header() {
 }
 
 #[test]
+fn codec2_profiles_cover_python_mode_headers() {
+    let cases = [
+        (CodecProfile::Codec2_700C, 0x00, 320),
+        (CodecProfile::Codec2_1200, 0x01, 320),
+        (CodecProfile::Codec2_1300, 0x02, 320),
+        (CodecProfile::Codec2_1400, 0x03, 320),
+        (CodecProfile::Codec2_1600, 0x04, 320),
+        (CodecProfile::Codec2_2400, 0x05, 160),
+        (CodecProfile::Codec2_3200, 0x06, 160),
+    ];
+
+    for (profile, header, samples_per_frame) in cases {
+        let frame = AudioFrame::new(8_000, 1, vec![0.0; samples_per_frame]).unwrap();
+        let mut codec = Codec2Codec::new(profile);
+        let encoded = codec.encode(&frame).unwrap();
+        assert_eq!(encoded[0], header, "{profile:?}");
+        assert!(!encoded[1..].is_empty(), "{profile:?}");
+
+        let decoded = codec.decode(&encoded, 8_000).unwrap();
+        assert_eq!(decoded.samplerate(), 8_000, "{profile:?}");
+        assert_eq!(decoded.channels(), 1, "{profile:?}");
+        assert_eq!(decoded.frame_count(), samples_per_frame, "{profile:?}");
+    }
+}
+
+#[test]
+fn codec_factory_creates_all_python_codec2_profiles() {
+    for profile in [
+        CodecProfile::Codec2_700C,
+        CodecProfile::Codec2_1200,
+        CodecProfile::Codec2_1300,
+        CodecProfile::Codec2_1400,
+        CodecProfile::Codec2_1600,
+        CodecProfile::Codec2_2400,
+        CodecProfile::Codec2_3200,
+    ] {
+        let codec = CodecFactory::create(CodecSelection::Profile(profile));
+        assert_eq!(codec.kind(), lxst::CodecKind::Codec2, "{profile:?}");
+    }
+}
+
+#[test]
 fn codec2_decode_uses_embedded_mode_header() {
     let samples = vec![0.0; 160];
     let frame = AudioFrame::new(8_000, 1, samples).unwrap();
@@ -356,6 +398,24 @@ fn line_source_frame_plan_matches_python_opus_quantize_then_nearest_valid() {
     assert_eq!(plan.target_frame_ms, 5.0);
     assert_eq!(plan.frame_count, 40);
     assert_eq!(plan.sample_count, 40);
+}
+
+#[test]
+fn line_source_frame_plan_quantizes_all_codec2_profiles_to_40ms_blocks() {
+    for profile in [
+        CodecProfile::Codec2_700C,
+        CodecProfile::Codec2_1200,
+        CodecProfile::Codec2_1300,
+        CodecProfile::Codec2_1400,
+        CodecProfile::Codec2_1600,
+        CodecProfile::Codec2_2400,
+        CodecProfile::Codec2_3200,
+    ] {
+        let plan = plan_line_source_frame(45.0, Some(profile), 8_000, 1).unwrap();
+        assert_eq!(plan.target_frame_ms, 80.0, "{profile:?}");
+        assert_eq!(plan.frame_count, 640, "{profile:?}");
+        assert_eq!(plan.sample_count, 640, "{profile:?}");
+    }
 }
 
 #[test]

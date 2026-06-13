@@ -533,7 +533,11 @@ impl CodecFactory {
             CodecSelection::Profile(profile) => match profile {
                 CodecProfile::Raw => Box::new(RawCodec::default()),
                 CodecProfile::Codec2_700C
+                | CodecProfile::Codec2_1200
+                | CodecProfile::Codec2_1300
+                | CodecProfile::Codec2_1400
                 | CodecProfile::Codec2_1600
+                | CodecProfile::Codec2_2400
                 | CodecProfile::Codec2_3200 => Box::new(Codec2Codec::new(profile)),
                 _ => Box::new(OpusCodec::new(profile)),
             },
@@ -617,7 +621,11 @@ fn max_bytes_per_frame_tenths(bitrate_ceiling: u32, frame_duration_tenths_ms: u3
 
 fn codec2_mode(profile: CodecProfile) -> Result<Codec2Mode, CodecError> {
     match profile {
+        CodecProfile::Codec2_1200 => Ok(Codec2Mode::MODE_1200),
+        CodecProfile::Codec2_1300 => Ok(Codec2Mode::MODE_1300),
+        CodecProfile::Codec2_1400 => Ok(Codec2Mode::MODE_1400),
         CodecProfile::Codec2_1600 => Ok(Codec2Mode::MODE_1600),
+        CodecProfile::Codec2_2400 => Ok(Codec2Mode::MODE_2400),
         CodecProfile::Codec2_3200 => Ok(Codec2Mode::MODE_3200),
         CodecProfile::Codec2_700C => Err(CodecError::Unsupported(
             "Codec2 700C is not implemented by the pure Rust codec2 backend".to_string(),
@@ -631,7 +639,11 @@ fn codec2_mode(profile: CodecProfile) -> Result<Codec2Mode, CodecError> {
 fn codec2_mode_header(profile: CodecProfile) -> Result<u8, CodecError> {
     match profile {
         CodecProfile::Codec2_700C => Ok(0x00),
+        CodecProfile::Codec2_1200 => Ok(0x01),
+        CodecProfile::Codec2_1300 => Ok(0x02),
+        CodecProfile::Codec2_1400 => Ok(0x03),
         CodecProfile::Codec2_1600 => Ok(0x04),
+        CodecProfile::Codec2_2400 => Ok(0x05),
         CodecProfile::Codec2_3200 => Ok(0x06),
         other => Err(CodecError::InvalidProfile(format!(
             "{other:?} is not a Codec2 profile"
@@ -641,7 +653,11 @@ fn codec2_mode_header(profile: CodecProfile) -> Result<u8, CodecError> {
 
 fn codec2_mode_from_header(header: u8) -> Result<Codec2Mode, CodecError> {
     match header {
+        0x01 => Ok(Codec2Mode::MODE_1200),
+        0x02 => Ok(Codec2Mode::MODE_1300),
+        0x03 => Ok(Codec2Mode::MODE_1400),
         0x04 => Ok(Codec2Mode::MODE_1600),
+        0x05 => Ok(Codec2Mode::MODE_2400),
         0x06 => Ok(Codec2Mode::MODE_3200),
         0x00 => Err(CodecError::Unsupported(
             "Codec2 700C is not implemented by the pure Rust codec2 backend".to_string(),
@@ -653,7 +669,11 @@ fn codec2_mode_from_header(header: u8) -> Result<Codec2Mode, CodecError> {
 fn codec2_modes_equal(left: Codec2Mode, right: Codec2Mode) -> bool {
     matches!(
         (left, right),
-        (Codec2Mode::MODE_1600, Codec2Mode::MODE_1600)
+        (Codec2Mode::MODE_1200, Codec2Mode::MODE_1200)
+            | (Codec2Mode::MODE_1300, Codec2Mode::MODE_1300)
+            | (Codec2Mode::MODE_1400, Codec2Mode::MODE_1400)
+            | (Codec2Mode::MODE_1600, Codec2Mode::MODE_1600)
+            | (Codec2Mode::MODE_2400, Codec2Mode::MODE_2400)
             | (Codec2Mode::MODE_3200, Codec2Mode::MODE_3200)
     )
 }

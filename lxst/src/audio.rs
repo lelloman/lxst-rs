@@ -502,13 +502,17 @@ fn codec_timing(profile: CodecProfile) -> Option<CodecTiming> {
             frame_max_ms: Some(60.0),
             valid_frame_ms: Some(&[2.5, 5.0, 10.0, 20.0, 40.0, 60.0]),
         }),
-        CodecProfile::Codec2_700C | CodecProfile::Codec2_1600 | CodecProfile::Codec2_3200 => {
-            Some(CodecTiming {
-                frame_quanta_ms: Some(40.0),
-                frame_max_ms: None,
-                valid_frame_ms: None,
-            })
-        }
+        CodecProfile::Codec2_700C
+        | CodecProfile::Codec2_1200
+        | CodecProfile::Codec2_1300
+        | CodecProfile::Codec2_1400
+        | CodecProfile::Codec2_1600
+        | CodecProfile::Codec2_2400
+        | CodecProfile::Codec2_3200 => Some(CodecTiming {
+            frame_quanta_ms: Some(40.0),
+            frame_max_ms: None,
+            valid_frame_ms: None,
+        }),
         CodecProfile::Raw => None,
         _ => None,
     }
