@@ -21,6 +21,9 @@ fn systemd_flag_prints_unit() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("[Unit]"));
     assert!(stdout.contains("Reticulum Telephone Service"));
+    assert!(stdout.contains("Environment=\"DISPLAY=:0\""));
+    assert!(stdout.contains("Environment=\"XDG_RUNTIME_DIR=/run/user/1000\""));
+    assert!(stdout.contains(".local/bin/rnphone --service -vvv"));
 }
 
 #[test]

@@ -862,7 +862,7 @@ fn print_help_menu() {
 fn systemd_unit() -> String {
     let user = env::var("USER").unwrap_or_else(|_| "USERNAME".to_string());
     format!(
-        "# This systemd unit allows installing rnphone as a system service on Linux-based devices\n[Unit]\nDescription=Reticulum Telephone Service\nAfter=sound.target\n\n[Service]\nExecStartPre=/bin/sleep 30\nType=simple\nRestart=always\nRestartSec=5\nUser={user}\nExecStart=/usr/local/bin/rnphone --service -vvv\n\n[Install]\nWantedBy=graphical.target\n"
+        "# This systemd unit allows installing rnphone as a system service on Linux-based devices\n[Unit]\nDescription=Reticulum Telephone Service\nAfter=sound.target\n\n[Service]\nExecStartPre=/bin/sleep 30\nType=simple\nEnvironment=\"DISPLAY=:0\"\nEnvironment=\"XAUTHORITY=/home/{user}/.Xauthority\"\nEnvironment=\"XDG_RUNTIME_DIR=/run/user/1000\"\nRestart=always\nRestartSec=5\nUser={user}\nExecStart=/home/{user}/.local/bin/rnphone --service -vvv\n\n[Install]\nWantedBy=graphical.target\n"
     )
 }
 
