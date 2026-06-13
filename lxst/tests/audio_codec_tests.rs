@@ -28,12 +28,27 @@ fn raw_codec_round_trips_f32_frames() {
 }
 
 #[test]
-fn raw_codec_rejects_unsupported_float16_encode() {
-    let frame = AudioFrame::new(48_000, 1, vec![0.0]).unwrap();
+fn raw_codec_round_trips_f16_frames_like_python() {
+    let frame = AudioFrame::new(48_000, 1, vec![0.0, 0.5, -0.5, 1.0]).unwrap();
+    let mut codec = RawCodec::new(RawBitDepth::Float16);
+    let encoded = codec.encode(&frame).unwrap();
+    assert_eq!(
+        encoded,
+        vec![0x00, 0x00, 0x00, 0x00, 0x38, 0x00, 0xb8, 0x00, 0x3c]
+    );
+
+    let decoded = codec.decode(&encoded, 48_000).unwrap();
+    assert_eq!(decoded.channels(), 1);
+    assert_eq!(decoded.samplerate(), 48_000);
+    assert_eq!(decoded.samples(), frame.samples());
+}
+
+#[test]
+fn raw_codec_rejects_truncated_f16_payloads() {
     let mut codec = RawCodec::new(RawBitDepth::Float16);
     assert!(matches!(
-        codec.encode(&frame),
-        Err(CodecError::Unsupported(_))
+        codec.decode(&[0x00, 0x00], 48_000),
+        Err(CodecError::InvalidPayloadLength(1))
     ));
 }
 

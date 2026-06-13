@@ -67,9 +67,15 @@ impl AudioCodec for RawCodec {
     fn encode(&mut self, frame: &AudioFrame) -> Result<Vec<u8>, CodecError> {
         self.channels = Some(frame.channels());
         let header = RawFrameHeader::new(self.bit_depth, frame.channels())?;
-        let mut bytes = Vec::with_capacity(1 + frame.samples().len() * 4);
+        let sample_width = usize::from(self.bit_depth.bits() / 8);
+        let mut bytes = Vec::with_capacity(1 + frame.samples().len() * sample_width);
         bytes.push(header.encode());
         match self.bit_depth {
+            RawBitDepth::Float16 => {
+                for sample in frame.samples() {
+                    bytes.extend_from_slice(&f32_to_f16_bits(*sample).to_le_bytes());
+                }
+            }
             RawBitDepth::Float32 => {
                 for sample in frame.samples() {
                     bytes.extend_from_slice(&sample.to_le_bytes());
@@ -80,7 +86,7 @@ impl AudioCodec for RawCodec {
                     bytes.extend_from_slice(&(*sample as f64).to_le_bytes());
                 }
             }
-            RawBitDepth::Float16 | RawBitDepth::Float128 => {
+            RawBitDepth::Float128 => {
                 return Err(CodecError::Unsupported(format!(
                     "raw {}-bit samples are not implemented",
                     self.bit_depth.bits()
@@ -96,6 +102,15 @@ impl AudioCodec for RawCodec {
         self.channels = Some(header.channels);
 
         let samples = match header.bit_depth {
+            RawBitDepth::Float16 => {
+                if payload.len() % 2 != 0 {
+                    return Err(CodecError::InvalidPayloadLength(payload.len()));
+                }
+                payload
+                    .chunks_exact(2)
+                    .map(|chunk| f16_bits_to_f32(u16::from_le_bytes(chunk.try_into().unwrap())))
+                    .collect()
+            }
             RawBitDepth::Float32 => {
                 if payload.len() % 4 != 0 {
                     return Err(CodecError::InvalidPayloadLength(payload.len()));
@@ -114,7 +129,7 @@ impl AudioCodec for RawCodec {
                     .map(|chunk| f64::from_le_bytes(chunk.try_into().unwrap()) as f32)
                     .collect()
             }
-            RawBitDepth::Float16 | RawBitDepth::Float128 => {
+            RawBitDepth::Float128 => {
                 return Err(CodecError::Unsupported(format!(
                     "raw {}-bit samples are not implemented",
                     header.bit_depth.bits()
@@ -409,6 +424,69 @@ impl AudioCodec for Codec2Codec {
             Ok(decoded.resampled(samplerate)?)
         }
     }
+}
+
+fn f32_to_f16_bits(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xff) as i32;
+    let mantissa = bits & 0x7f_ffff;
+
+    if exponent == 0xff {
+        let nan_payload = if mantissa == 0 {
+            0
+        } else {
+            ((mantissa >> 13) as u16).max(1)
+        };
+        return sign | 0x7c00 | nan_payload;
+    }
+
+    let half_exponent = exponent - 127 + 15;
+    if half_exponent >= 0x1f {
+        return sign | 0x7c00;
+    }
+
+    if half_exponent <= 0 {
+        if half_exponent < -10 {
+            return sign;
+        }
+        let mantissa = mantissa | 0x80_0000;
+        let shift = (14 - half_exponent) as u32;
+        let mut half = (mantissa >> shift) as u16;
+        if ((mantissa >> (shift - 1)) & 1) != 0 {
+            half = half.saturating_add(1);
+        }
+        return sign | half;
+    }
+
+    let mut half = sign | ((half_exponent as u16) << 10) | ((mantissa >> 13) as u16);
+    if (mantissa & 0x1000) != 0 {
+        half = half.saturating_add(1);
+    }
+    half
+}
+
+fn f16_bits_to_f32(bits: u16) -> f32 {
+    let sign = ((bits & 0x8000) as u32) << 16;
+    let exponent = (bits >> 10) & 0x1f;
+    let mantissa = (bits & 0x03ff) as u32;
+
+    let f32_bits = match exponent {
+        0 if mantissa == 0 => sign,
+        0 => {
+            let mut mantissa = mantissa;
+            let mut exponent = -14i32;
+            while (mantissa & 0x0400) == 0 {
+                mantissa <<= 1;
+                exponent -= 1;
+            }
+            mantissa &= 0x03ff;
+            sign | (((exponent + 127) as u32) << 23) | (mantissa << 13)
+        }
+        0x1f => sign | 0x7f80_0000 | (mantissa << 13),
+        exponent => sign | (((exponent as i32 - 15 + 127) as u32) << 23) | (mantissa << 13),
+    };
+    f32::from_bits(f32_bits)
 }
 
 type Codec2Create = unsafe extern "C" fn(c_int) -> *mut c_void;
