@@ -706,6 +706,75 @@ fn telephone_follows_basic_incoming_flow() {
 }
 
 #[test]
+fn telephone_incoming_event_order_matches_call_flow() {
+    let caller = [0x18; 16];
+    let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
+
+    assert!(telephone.begin_incoming_call(caller));
+    assert!(telephone.answer());
+    assert!(telephone.establish());
+
+    let events: Vec<_> = rx.try_iter().collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| match event {
+                lxst::telephony::CallEvent::StateChanged(state) => Some(*state),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            CallState::Ringing,
+            CallState::Connecting,
+            CallState::Established
+        ]
+    );
+    assert!(matches!(
+        events.get(1),
+        Some(lxst::telephony::CallEvent::IncomingCall { identity_hash })
+            if *identity_hash == caller
+    ));
+    assert!(matches!(
+        events.last(),
+        Some(lxst::telephony::CallEvent::CallEstablished { identity_hash })
+            if *identity_hash == caller
+    ));
+}
+
+#[test]
+fn telephone_outgoing_event_order_matches_call_flow() {
+    let remote = [0x19; 16];
+    let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
+
+    assert!(telephone.begin_outgoing_call(remote));
+    telephone.apply_signal(Signal::Code(SignalCode::Ringing));
+    telephone.apply_signal(Signal::Code(SignalCode::Connecting));
+    telephone.apply_signal(Signal::Code(SignalCode::Established));
+
+    let events: Vec<_> = rx.try_iter().collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| match event {
+                lxst::telephony::CallEvent::StateChanged(state) => Some(*state),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            CallState::Calling,
+            CallState::Ringing,
+            CallState::Connecting,
+            CallState::Established
+        ]
+    );
+    assert!(matches!(
+        events.last(),
+        Some(lxst::telephony::CallEvent::CallEstablished { identity_hash })
+            if *identity_hash == remote
+    ));
+}
+
+#[test]
 fn telephone_cannot_establish_unanswered_incoming_call() {
     let caller = [0x17; 16];
     let (mut telephone, rx) = Telephone::new(TelephoneConfig::default());
