@@ -703,6 +703,7 @@ struct RnphoneConfig {
     allow_phonebook_callers: bool,
     blocked_callers: HashSet<[u8; 16]>,
     audio_devices: AudioDeviceConfig,
+    hardware: HardwareConfig,
     ringtone_path: Option<PathBuf>,
 }
 
@@ -713,6 +714,21 @@ struct AudioDeviceConfig {
     ringer: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct HardwareConfig {
+    keypad: Option<String>,
+    display: Option<String>,
+    keypad_hook_pin: Option<u8>,
+    amp_mute_pin: Option<u8>,
+    amp_mute_level: Option<PinLevel>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PinLevel {
+    Low,
+    High,
+}
+
 impl Default for RnphoneConfig {
     fn default() -> Self {
         Self {
@@ -721,6 +737,7 @@ impl Default for RnphoneConfig {
             allow_phonebook_callers: false,
             blocked_callers: HashSet::new(),
             audio_devices: AudioDeviceConfig::default(),
+            hardware: HardwareConfig::default(),
             ringtone_path: None,
         }
     }
@@ -769,6 +786,21 @@ impl RnphoneConfig {
                 }
                 "telephone" if key == "ringer" => {
                     config.audio_devices.ringer = non_empty_config_value(value);
+                }
+                "hardware" if key == "keypad" => {
+                    config.hardware.keypad = non_empty_config_value(value);
+                }
+                "hardware" if key == "display" => {
+                    config.hardware.display = non_empty_config_value(value);
+                }
+                "hardware" if key == "keypad_hook_pin" => {
+                    config.hardware.keypad_hook_pin = parse_optional_u8(value)?;
+                }
+                "hardware" if key == "amp_mute_pin" => {
+                    config.hardware.amp_mute_pin = parse_optional_u8(value)?;
+                }
+                "hardware" if key == "amp_mute_level" => {
+                    config.hardware.amp_mute_level = parse_pin_level(value)?;
                 }
                 "phonebook" => {
                     let parts = split_list(value);
@@ -875,6 +907,27 @@ fn non_empty_config_value(value: &str) -> Option<String> {
         None
     } else {
         Some(value.to_string())
+    }
+}
+
+fn parse_optional_u8(value: &str) -> Result<Option<u8>, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        value
+            .parse::<u8>()
+            .map(Some)
+            .map_err(|e| format!("invalid pin value {value}: {e}"))
+    }
+}
+
+fn parse_pin_level(value: &str) -> Result<Option<PinLevel>, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" => Ok(None),
+        "low" | "0" => Ok(Some(PinLevel::Low)),
+        "high" | "1" => Ok(Some(PinLevel::High)),
+        other => Err(format!("invalid pin level {other}")),
     }
 }
 
@@ -1031,6 +1084,26 @@ mod tests {
         );
         assert_eq!(config.audio_devices.microphone.as_deref(), Some("Desk Mic"));
         assert_eq!(config.audio_devices.ringer.as_deref(), Some("Bell Speaker"));
+    }
+
+    #[test]
+    fn parses_hardware_config() {
+        let config = RnphoneConfig::parse(
+            "[hardware]\nkeypad = gpio_4x4\ndisplay = i2c_lcd1602\nkeypad_hook_pin = 5\namp_mute_pin = 25\namp_mute_level = high\n",
+        )
+        .unwrap();
+
+        assert_eq!(config.hardware.keypad.as_deref(), Some("gpio_4x4"));
+        assert_eq!(config.hardware.display.as_deref(), Some("i2c_lcd1602"));
+        assert_eq!(config.hardware.keypad_hook_pin, Some(5));
+        assert_eq!(config.hardware.amp_mute_pin, Some(25));
+        assert_eq!(config.hardware.amp_mute_level, Some(PinLevel::High));
+    }
+
+    #[test]
+    fn rejects_invalid_hardware_pin_level() {
+        let err = RnphoneConfig::parse("[hardware]\namp_mute_level = floating\n").unwrap_err();
+        assert!(err.contains("invalid pin level"));
     }
 
     #[test]
