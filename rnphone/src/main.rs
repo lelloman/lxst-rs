@@ -165,6 +165,7 @@ impl App {
             save_identity(&identity, &identity_path).map_err(|e| e.to_string())?;
             identity
         };
+        config.resolve_paths(&config_dir);
         config.finalize_for_identity(identity.hash());
 
         let telephone_config = TelephoneConfig {
@@ -629,6 +630,7 @@ struct RnphoneConfig {
     allow_phonebook_callers: bool,
     blocked_callers: HashSet<[u8; 16]>,
     audio_devices: AudioDeviceConfig,
+    ringtone_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -646,6 +648,7 @@ impl Default for RnphoneConfig {
             allow_phonebook_callers: false,
             blocked_callers: HashSet::new(),
             audio_devices: AudioDeviceConfig::default(),
+            ringtone_path: None,
         }
     }
 }
@@ -682,6 +685,9 @@ impl RnphoneConfig {
                         config.blocked_callers.insert(parse_hash(item)?);
                     }
                 }
+                "telephone" if key == "ringtone" => {
+                    config.ringtone_path = non_empty_config_value(value).map(PathBuf::from);
+                }
                 "telephone" if key == "speaker" => {
                     config.audio_devices.speaker = non_empty_config_value(value);
                 }
@@ -716,6 +722,14 @@ impl RnphoneConfig {
             );
         }
         Ok(config)
+    }
+
+    fn resolve_paths(&mut self, config_dir: &Path) {
+        if let Some(path) = &self.ringtone_path {
+            if path.is_relative() {
+                self.ringtone_path = Some(config_dir.join(path));
+            }
+        }
     }
 
     fn finalize_for_identity(&mut self, own_hash: &[u8; 16]) {
@@ -910,6 +924,25 @@ mod tests {
             RnphoneConfig::parse("[phonebook]\nMary = f3e8c3359b39d36f3baff0a616a73d3e, 123\n")
                 .unwrap();
         assert_eq!(config.phonebook["Mary"].alias.as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn parses_and_resolves_ringtone_path() {
+        let mut config = RnphoneConfig::parse("[telephone]\nringtone = soft.opus\n").unwrap();
+        assert_eq!(config.ringtone_path, Some(PathBuf::from("soft.opus")));
+
+        config.resolve_paths(Path::new("/tmp/rnphone-test"));
+        assert_eq!(
+            config.ringtone_path,
+            Some(PathBuf::from("/tmp/rnphone-test/soft.opus"))
+        );
+    }
+
+    #[test]
+    fn preserves_absolute_ringtone_path() {
+        let mut config = RnphoneConfig::parse("[telephone]\nringtone = /opt/ring.opus\n").unwrap();
+        config.resolve_paths(Path::new("/tmp/rnphone-test"));
+        assert_eq!(config.ringtone_path, Some(PathBuf::from("/opt/ring.opus")));
     }
 
     #[test]
