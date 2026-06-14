@@ -14,8 +14,8 @@ use lxst::network::{
 use lxst::{
     Agc, AudioCodec, AudioSink, AudioSource, BandPass, CallProfile, CallState, CodecFactory,
     CodecSelection, CpalInputConfig, CpalInputSource, CpalOutputConfig, CpalOutputSink,
-    EncodedAudioFrame, LxstPacket, Signal, SignalCode, Telephone, TelephoneConfig,
-    TelephonyNetworkEvent,
+    EncodedAudioFrame, LxstPacket, OpusFileSource, Signal, SignalCode, SourcePlayer, Telephone,
+    TelephoneConfig, TelephonyNetworkEvent,
 };
 use rns_crypto::identity::Identity;
 use rns_crypto::OsRng;
@@ -140,6 +140,7 @@ struct App {
     network_events: Option<mpsc::Receiver<TelephonyNetworkEvent>>,
     active_link: Option<[u8; 16]>,
     active_audio: Option<CallAudio>,
+    active_ringer: Option<RingerAudio>,
     last_dialed: Option<[u8; 16]>,
 }
 
@@ -186,6 +187,7 @@ impl App {
             network_events: None,
             active_link: None,
             active_audio: None,
+            active_ringer: None,
             last_dialed: None,
         })
     }
@@ -341,6 +343,7 @@ impl App {
         if self.telephone.state() == CallState::Ringing {
             self.send_signal(Signal::Code(SignalCode::Rejected));
         }
+        self.stop_ringer();
         self.stop_call_audio();
         if let (Some(node), Some(link_id)) = (self.node.as_ref(), self.active_link.take()) {
             let _ = node.teardown_link(link_id);
@@ -387,6 +390,7 @@ impl App {
             TelephonyNetworkEvent::LinkClosed { link_id, .. } => {
                 if self.active_link == Some(link_id.0) {
                     self.active_link = None;
+                    self.stop_ringer();
                     self.stop_call_audio();
                     if self.telephone.state() != CallState::Available {
                         self.telephone.hangup();
@@ -403,6 +407,7 @@ impl App {
                     if self.telephone.begin_incoming_call(identity_hash.0) {
                         self.active_link = Some(link_id.0);
                         self.send_signal(Signal::Code(SignalCode::Ringing));
+                        self.start_ringer();
                         println!("Incoming call from {identity_hash}");
                     } else {
                         self.send_signal(Signal::Code(SignalCode::Busy));
@@ -423,13 +428,39 @@ impl App {
                                 self.start_call_audio(link_id);
                             }
                         }
+                        if self.telephone.state() != CallState::Ringing {
+                            self.stop_ringer();
+                        }
                     }
                 }
             }
         }
     }
 
+    fn start_ringer(&mut self) {
+        if self.active_ringer.is_some() {
+            return;
+        }
+        let Some(path) = self.config.ringtone_path.clone() else {
+            return;
+        };
+        if !path.is_file() {
+            return;
+        }
+        match RingerAudio::start(path, self.config.audio_devices.ringer.clone()) {
+            Ok(ringer) => self.active_ringer = Some(ringer),
+            Err(err) => println!("Ringer unavailable: {err}"),
+        }
+    }
+
+    fn stop_ringer(&mut self) {
+        if let Some(mut ringer) = self.active_ringer.take() {
+            ringer.stop();
+        }
+    }
+
     fn start_call_audio(&mut self, link_id: [u8; 16]) {
+        self.stop_ringer();
         if self.active_audio.is_some() {
             return;
         }
@@ -475,6 +506,48 @@ impl App {
                 Some(alias) => println!("  {alias} {name}: {}", hex(&entry.identity_hash)),
                 None => println!("  {name}: {}", hex(&entry.identity_hash)),
             }
+        }
+    }
+}
+
+struct RingerAudio {
+    stop_tx: mpsc::Sender<()>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl RingerAudio {
+    fn start(path: PathBuf, preferred_device: Option<String>) -> Result<Self, String> {
+        let source = OpusFileSource::open(&path, 60, true).map_err(|e| e.to_string())?;
+        let sink = CpalOutputSink::new(CpalOutputConfig {
+            preferred_device,
+            ..CpalOutputConfig::default()
+        })
+        .map_err(|e| e.to_string())?;
+        let mut player = SourcePlayer::new(source, sink);
+        player.start().map_err(|e| e.to_string())?;
+
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            while stop_rx.try_recv().is_err() {
+                if let Err(err) = player.process_next() {
+                    eprintln!("rnphone ringer: {err}");
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            let _ = player.stop();
+        });
+
+        Ok(Self {
+            stop_tx,
+            worker: Some(worker),
+        })
+    }
+
+    fn stop(&mut self) {
+        let _ = self.stop_tx.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
         }
     }
 }
