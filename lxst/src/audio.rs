@@ -1479,8 +1479,8 @@ impl ToneSource {
             } else {
                 1.0
             };
-            let value = self.phase.sin() * self.gain * ease_gain;
             self.phase = (self.phase + step) % (2.0 * PI);
+            let value = self.phase.sin() * self.gain * ease_gain;
             for _ in 0..self.channels {
                 samples.push(value);
             }
