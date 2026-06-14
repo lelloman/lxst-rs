@@ -16,6 +16,166 @@ use crate::pipeline::{AudioSink, AudioSource, EncodedAudioFrame, PipelineError};
 pub const APP_NAME: &str = "lxst";
 pub const TELEPHONY_PRIMITIVE: &str = "telephony";
 
+pub trait TelephonyNode {
+    fn register_destination_with_proof(
+        &self,
+        destination: &Destination,
+        signing_key: Option<[u8; 64]>,
+    ) -> Result<(), NetworkError>;
+
+    fn register_link_destination(
+        &self,
+        dest_hash: [u8; 16],
+        sig_prv_bytes: [u8; 32],
+        sig_pub_bytes: [u8; 32],
+        resource_strategy: u8,
+    ) -> Result<(), NetworkError>;
+
+    fn announce(
+        &self,
+        destination: &Destination,
+        identity: &Identity,
+        app_data: Option<&[u8]>,
+    ) -> Result<(), NetworkError>;
+
+    fn has_path(&self, dest_hash: &DestHash) -> Result<bool, NetworkError>;
+
+    fn request_path(&self, dest_hash: &DestHash) -> Result<(), NetworkError>;
+
+    fn recall_identity(
+        &self,
+        dest_hash: &DestHash,
+    ) -> Result<Option<AnnouncedIdentity>, NetworkError>;
+
+    fn create_link(
+        &self,
+        dest_hash: [u8; 16],
+        dest_sig_pub_bytes: [u8; 32],
+    ) -> Result<[u8; 16], NetworkError>;
+}
+
+impl TelephonyNode for RnsNode {
+    fn register_destination_with_proof(
+        &self,
+        destination: &Destination,
+        signing_key: Option<[u8; 64]>,
+    ) -> Result<(), NetworkError> {
+        RnsNode::register_destination_with_proof(self, destination, signing_key)?;
+        Ok(())
+    }
+
+    fn register_link_destination(
+        &self,
+        dest_hash: [u8; 16],
+        sig_prv_bytes: [u8; 32],
+        sig_pub_bytes: [u8; 32],
+        resource_strategy: u8,
+    ) -> Result<(), NetworkError> {
+        RnsNode::register_link_destination(
+            self,
+            dest_hash,
+            sig_prv_bytes,
+            sig_pub_bytes,
+            resource_strategy,
+        )?;
+        Ok(())
+    }
+
+    fn announce(
+        &self,
+        destination: &Destination,
+        identity: &Identity,
+        app_data: Option<&[u8]>,
+    ) -> Result<(), NetworkError> {
+        RnsNode::announce(self, destination, identity, app_data)?;
+        Ok(())
+    }
+
+    fn has_path(&self, dest_hash: &DestHash) -> Result<bool, NetworkError> {
+        Ok(RnsNode::has_path(self, dest_hash)?)
+    }
+
+    fn request_path(&self, dest_hash: &DestHash) -> Result<(), NetworkError> {
+        RnsNode::request_path(self, dest_hash)?;
+        Ok(())
+    }
+
+    fn recall_identity(
+        &self,
+        dest_hash: &DestHash,
+    ) -> Result<Option<AnnouncedIdentity>, NetworkError> {
+        Ok(RnsNode::recall_identity(self, dest_hash)?)
+    }
+
+    fn create_link(
+        &self,
+        dest_hash: [u8; 16],
+        dest_sig_pub_bytes: [u8; 32],
+    ) -> Result<[u8; 16], NetworkError> {
+        Ok(RnsNode::create_link(self, dest_hash, dest_sig_pub_bytes)?)
+    }
+}
+
+impl<N> TelephonyNode for Arc<N>
+where
+    N: TelephonyNode + ?Sized,
+{
+    fn register_destination_with_proof(
+        &self,
+        destination: &Destination,
+        signing_key: Option<[u8; 64]>,
+    ) -> Result<(), NetworkError> {
+        (**self).register_destination_with_proof(destination, signing_key)
+    }
+
+    fn register_link_destination(
+        &self,
+        dest_hash: [u8; 16],
+        sig_prv_bytes: [u8; 32],
+        sig_pub_bytes: [u8; 32],
+        resource_strategy: u8,
+    ) -> Result<(), NetworkError> {
+        (**self).register_link_destination(
+            dest_hash,
+            sig_prv_bytes,
+            sig_pub_bytes,
+            resource_strategy,
+        )
+    }
+
+    fn announce(
+        &self,
+        destination: &Destination,
+        identity: &Identity,
+        app_data: Option<&[u8]>,
+    ) -> Result<(), NetworkError> {
+        (**self).announce(destination, identity, app_data)
+    }
+
+    fn has_path(&self, dest_hash: &DestHash) -> Result<bool, NetworkError> {
+        (**self).has_path(dest_hash)
+    }
+
+    fn request_path(&self, dest_hash: &DestHash) -> Result<(), NetworkError> {
+        (**self).request_path(dest_hash)
+    }
+
+    fn recall_identity(
+        &self,
+        dest_hash: &DestHash,
+    ) -> Result<Option<AnnouncedIdentity>, NetworkError> {
+        (**self).recall_identity(dest_hash)
+    }
+
+    fn create_link(
+        &self,
+        dest_hash: [u8; 16],
+        dest_sig_pub_bytes: [u8; 32],
+    ) -> Result<[u8; 16], NetworkError> {
+        (**self).create_link(dest_hash, dest_sig_pub_bytes)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum TelephonyNetworkEvent {
     Announce(AnnouncedIdentity),
@@ -142,7 +302,10 @@ impl TelephonyEndpoint {
         Self { destination }
     }
 
-    pub fn register(&self, node: &RnsNode, identity: &Identity) -> Result<(), NetworkError> {
+    pub fn register<N>(&self, node: &N, identity: &Identity) -> Result<(), NetworkError>
+    where
+        N: TelephonyNode + ?Sized,
+    {
         node.register_destination_with_proof(&self.destination, identity.get_private_key())?;
         let private_key = identity
             .get_private_key()
@@ -156,7 +319,10 @@ impl TelephonyEndpoint {
         Ok(())
     }
 
-    pub fn announce(&self, node: &RnsNode, identity: &Identity) -> Result<(), NetworkError> {
+    pub fn announce<N>(&self, node: &N, identity: &Identity) -> Result<(), NetworkError>
+    where
+        N: TelephonyNode + ?Sized,
+    {
         node.announce(&self.destination, identity, None)?;
         Ok(())
     }
@@ -385,12 +551,15 @@ pub fn telephony_dest_hash(identity_hash: [u8; 16]) -> DestHash {
     .hash
 }
 
-pub fn request_path_until(
-    node: &RnsNode,
+pub fn request_path_until<N>(
+    node: &N,
     dest_hash: DestHash,
     timeout: Duration,
     poll_interval: Duration,
-) -> Result<bool, NetworkError> {
+) -> Result<bool, NetworkError>
+where
+    N: TelephonyNode + ?Sized,
+{
     if node.has_path(&dest_hash)? {
         return Ok(true);
     }
@@ -402,23 +571,29 @@ pub fn request_path_until(
         }
         thread::sleep(poll_interval);
     }
-    Ok(node.has_path(&dest_hash)?)
+    node.has_path(&dest_hash)
 }
 
-pub fn recall_telephony_identity(
-    node: &RnsNode,
+pub fn recall_telephony_identity<N>(
+    node: &N,
     identity_hash: [u8; 16],
-) -> Result<Option<AnnouncedIdentity>, NetworkError> {
+) -> Result<Option<AnnouncedIdentity>, NetworkError>
+where
+    N: TelephonyNode + ?Sized,
+{
     let dest_hash = telephony_dest_hash(identity_hash);
-    Ok(node.recall_identity(&dest_hash)?)
+    node.recall_identity(&dest_hash)
 }
 
-pub fn create_telephony_link(
-    node: &RnsNode,
+pub fn create_telephony_link<N>(
+    node: &N,
     announced: &AnnouncedIdentity,
-) -> Result<[u8; 16], NetworkError> {
+) -> Result<[u8; 16], NetworkError>
+where
+    N: TelephonyNode + ?Sized,
+{
     let sig_pub = announced.public_key[32..64].try_into().unwrap();
-    Ok(node.create_link(announced.dest_hash.0, sig_pub)?)
+    node.create_link(announced.dest_hash.0, sig_pub)
 }
 
 #[derive(Debug, thiserror::Error)]

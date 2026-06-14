@@ -28,7 +28,7 @@ pub use media::{
 };
 pub use network::{
     telephony_callback_channel, LinkSource, LxstLinkSender, NetworkError, PacketSender, Packetizer,
-    TelephonyCallbacks, TelephonyEndpoint, TelephonyNetworkEvent,
+    TelephonyCallbacks, TelephonyEndpoint, TelephonyNetworkEvent, TelephonyNode,
 };
 pub use pipeline::{
     AudioSink, AudioSource, BufferedSink, BufferedSource, EncodedAudioFrame, EncodedMixerSink,
