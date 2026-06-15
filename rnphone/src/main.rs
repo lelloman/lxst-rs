@@ -11,8 +11,12 @@ use lxst::network::{
     create_telephony_link, recall_telephony_identity, request_path_until, telephony_dest_hash,
     LinkSource, LxstLinkSender, Packetizer, TelephonyEndpoint,
 };
+#[cfg(all(feature = "gpio-rpi", not(test)))]
+use lxst::Lcd1602Display;
 #[cfg(not(feature = "gpio-rpi"))]
 use lxst::MatrixKeypadBackend;
+#[cfg(all(feature = "gpio-rpi", not(test)))]
+use lxst::RpiI2cLcd1602;
 #[cfg(feature = "gpio-rpi")]
 use lxst::RpiMatrixKeypadBackend;
 use lxst::{
@@ -1052,6 +1056,18 @@ impl MatrixKeypadBackend for NoopKeypadBackend {
     }
 }
 
+fn start_hardware_display() -> Result<HardwareDisplay, String> {
+    #[cfg(all(feature = "gpio-rpi", not(test)))]
+    {
+        HardwareDisplay::rpi_lcd1602()
+    }
+
+    #[cfg(any(not(feature = "gpio-rpi"), test))]
+    {
+        Ok(HardwareDisplay::buffer())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PinLevel {
     Low,
@@ -1250,11 +1266,73 @@ enum HardwareAction {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+enum HardwareDisplay {
+    Buffer(Lcd1602Buffer),
+    #[cfg(all(feature = "gpio-rpi", not(test)))]
+    Rpi(RpiI2cLcd1602),
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl HardwareDisplay {
+    fn buffer() -> Self {
+        Self::Buffer(Lcd1602Buffer::new())
+    }
+
+    #[cfg(all(feature = "gpio-rpi", not(test)))]
+    fn rpi_lcd1602() -> Result<Self, String> {
+        RpiI2cLcd1602::rpi(
+            Lcd1602Buffer::DEFAULT_I2C_CH,
+            Lcd1602Buffer::DEFAULT_ADDR as u16,
+        )
+        .map(Self::Rpi)
+        .map_err(|err| format!("i2c LCD1602 unavailable: {err}"))
+    }
+
+    fn clear(&mut self) {
+        match self {
+            Self::Buffer(display) => display.clear(),
+            #[cfg(all(feature = "gpio-rpi", not(test)))]
+            Self::Rpi(display) => display.clear(),
+        }
+    }
+
+    fn print(&mut self, value: &str, x: usize, y: usize) {
+        match self {
+            Self::Buffer(display) => display.print(value, x, y),
+            #[cfg(all(feature = "gpio-rpi", not(test)))]
+            Self::Rpi(display) => display.print(value, x, y),
+        }
+    }
+
+    fn sleep(&mut self) {
+        match self {
+            Self::Buffer(display) => display.sleep(),
+            #[cfg(all(feature = "gpio-rpi", not(test)))]
+            Self::Rpi(display) => display.sleep(),
+        }
+    }
+
+    fn is_sleeping(&self) -> bool {
+        match self {
+            Self::Buffer(display) => display.is_sleeping(),
+            #[cfg(all(feature = "gpio-rpi", not(test)))]
+            Self::Rpi(display) => display.is_sleeping(),
+        }
+    }
+
+    #[cfg(test)]
+    fn row(&self, row: usize) -> Option<&str> {
+        match self {
+            Self::Buffer(display) => display.row(row),
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 struct HardwareUi {
     mode: HardwareMode,
     input: String,
-    display: Option<Lcd1602Buffer>,
+    display: Option<HardwareDisplay>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1263,13 +1341,22 @@ impl HardwareUi {
         Self {
             mode: HardwareMode::Idle,
             input: String::new(),
-            display: display_enabled.then(Lcd1602Buffer::new),
+            display: display_enabled.then(HardwareDisplay::buffer),
         }
     }
 
     fn from_config(config: &HardwareConfig) -> Result<Self, String> {
         config.validate()?;
-        Ok(Self::new(config.display_enabled()?))
+        let display = if config.display_enabled()? {
+            Some(start_hardware_display()?)
+        } else {
+            None
+        };
+        Ok(Self {
+            mode: HardwareMode::Idle,
+            input: String::new(),
+            display,
+        })
     }
 
     fn became_available(&mut self) {
@@ -1734,7 +1821,10 @@ mod tests {
         assert_eq!(err, "unknown keypad driver spi_keypad");
 
         let config = RnphoneConfig::parse("[hardware]\ndisplay = oled12864\n").unwrap();
-        let err = HardwareUi::from_config(&config.hardware).unwrap_err();
+        let err = match HardwareUi::from_config(&config.hardware) {
+            Ok(_) => panic!("unknown display driver should fail"),
+            Err(err) => err,
+        };
         assert_eq!(err, "unknown display driver oled12864");
     }
 
