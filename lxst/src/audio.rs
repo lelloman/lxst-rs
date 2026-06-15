@@ -1601,6 +1601,27 @@ pub fn list_audio_devices() -> Result<Vec<AudioDeviceInfo>, AudioError> {
     Ok(devices)
 }
 
+pub fn select_audio_device_info(
+    devices: &[AudioDeviceInfo],
+    kind: AudioDeviceKind,
+    preferred_name: Option<&str>,
+) -> Option<AudioDeviceInfo> {
+    let candidates = devices.iter().filter(|device| device.kind == kind);
+    if let Some(preferred_name) = preferred_name {
+        if let Some(device) = candidates
+            .clone()
+            .find(|device| device_name_matches(preferred_name, &device.name))
+        {
+            return Some(device.clone());
+        }
+    }
+    candidates
+        .clone()
+        .find(|device| device.is_default)
+        .or_else(|| candidates.into_iter().next())
+        .cloned()
+}
+
 fn device_info(
     device: &cpal::Device,
     kind: AudioDeviceKind,
@@ -1665,7 +1686,7 @@ fn select_device(
         }
         .map_err(|err| AudioError::Device(err.to_string()))?;
         for device in devices {
-            if device.to_string() == preferred_name {
+            if device_name_matches(preferred_name, &device.to_string()) {
                 return Ok(device);
             }
         }
@@ -1675,6 +1696,31 @@ fn select_device(
         AudioDeviceKind::Output => host.default_output_device(),
     }
     .ok_or(AudioError::NoDevice(kind))
+}
+
+fn device_name_matches(preferred_name: &str, candidate_name: &str) -> bool {
+    candidate_name == preferred_name
+        || candidate_name.contains(preferred_name)
+        || is_subsequence(preferred_name, candidate_name)
+}
+
+fn is_subsequence(pattern: &str, candidate: &str) -> bool {
+    if pattern.is_empty() {
+        return true;
+    }
+    let mut pattern = pattern.chars();
+    let Some(mut wanted) = pattern.next() else {
+        return true;
+    };
+    for ch in candidate.chars() {
+        if ch == wanted {
+            match pattern.next() {
+                Some(next) => wanted = next,
+                None => return true,
+            }
+        }
+    }
+    false
 }
 
 fn build_input_stream<T>(

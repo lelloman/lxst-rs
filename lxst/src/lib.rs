@@ -11,11 +11,12 @@ pub mod telephony;
 pub use lxst_core as core;
 
 pub use audio::{
-    list_audio_devices, plan_line_source_frame, plan_mixer_frame, Agc, AudioDeviceInfo,
-    AudioDeviceKind, AudioError, AudioFrame, AudioFramePlan, AudioStreamConfigInfo, BandPass,
-    CpalInputConfig, CpalInputSource, CpalOutputConfig, CpalOutputSink, HighPass, LinePlayback,
-    LineSourceFramePlan, LineSourceProcessor, LowPass, Mixer, MixerFramePlan, MixerRuntime,
-    MixerSink, QueuedLineSink, QueuedLineSinkConfig, QueuedLineSinkStats, ToneSource,
+    list_audio_devices, plan_line_source_frame, plan_mixer_frame, select_audio_device_info, Agc,
+    AudioDeviceInfo, AudioDeviceKind, AudioError, AudioFrame, AudioFramePlan,
+    AudioStreamConfigInfo, BandPass, CpalInputConfig, CpalInputSource, CpalOutputConfig,
+    CpalOutputSink, HighPass, LinePlayback, LineSourceFramePlan, LineSourceProcessor, LowPass,
+    Mixer, MixerFramePlan, MixerRuntime, MixerSink, QueuedLineSink, QueuedLineSinkConfig,
+    QueuedLineSinkStats, ToneSource,
 };
 pub use codec::{
     AudioCodec, Codec2Codec, CodecError, CodecFactory, CodecSelection, CodecState, NullCodec,

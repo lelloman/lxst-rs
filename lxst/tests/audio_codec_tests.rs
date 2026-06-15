@@ -1183,6 +1183,44 @@ fn telephone_device_helpers_filter_audio_devices() {
 }
 
 #[test]
+fn audio_device_selection_matches_upstream_exact_substring_and_fuzzy_rules() {
+    let devices = vec![
+        audio_device("Built-in Output", AudioDeviceKind::Output, true),
+        audio_device("USB Studio Monitor", AudioDeviceKind::Output, false),
+        audio_device("Desk Microphone", AudioDeviceKind::Input, true),
+    ];
+
+    assert_eq!(
+        lxst::select_audio_device_info(
+            &devices,
+            AudioDeviceKind::Output,
+            Some("USB Studio Monitor")
+        )
+        .unwrap()
+        .name,
+        "USB Studio Monitor"
+    );
+    assert_eq!(
+        lxst::select_audio_device_info(&devices, AudioDeviceKind::Output, Some("Studio"))
+            .unwrap()
+            .name,
+        "USB Studio Monitor"
+    );
+    assert_eq!(
+        lxst::select_audio_device_info(&devices, AudioDeviceKind::Output, Some("USM"))
+            .unwrap()
+            .name,
+        "USB Studio Monitor"
+    );
+    assert_eq!(
+        lxst::select_audio_device_info(&devices, AudioDeviceKind::Output, Some("missing"))
+            .unwrap()
+            .name,
+        "Built-in Output"
+    );
+}
+
+#[test]
 fn telephone_busy_signal_clears_pending_timeout() {
     let remote = [0x24; 16];
     let config = TelephoneConfig {
@@ -1340,6 +1378,16 @@ struct AddFilter {
 impl AudioFilter for AddFilter {
     fn process(&mut self, frame: AudioFrame) -> AudioFrame {
         frame.map_samples(|sample| sample + self.amount)
+    }
+}
+
+fn audio_device(name: &str, kind: AudioDeviceKind, is_default: bool) -> lxst::AudioDeviceInfo {
+    lxst::AudioDeviceInfo {
+        name: name.to_string(),
+        kind,
+        is_default,
+        default_config: None,
+        supported_configs: Vec::new(),
     }
 }
 
