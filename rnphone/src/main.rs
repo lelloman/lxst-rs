@@ -153,6 +153,7 @@ struct App {
     active_audio: Option<CallAudio>,
     active_ringer: Option<RingerAudio>,
     last_dialed: Option<[u8; 16]>,
+    call_status_started: Option<Instant>,
     hardware_ui: HardwareUi,
     hardware_last_event: Instant,
     hardware_events: Option<mpsc::Receiver<KeypadEvent>>,
@@ -220,6 +221,7 @@ impl App {
             active_audio: None,
             active_ringer: None,
             last_dialed: None,
+            call_status_started: None,
             hardware_ui,
             hardware_last_event,
             hardware_events,
@@ -251,9 +253,11 @@ impl App {
             println!("Identity hash: {}", pretty_hash(self.identity.hash()));
             self.became_available();
             loop {
+                let now = Instant::now();
                 self.poll_network_events();
-                self.poll_hardware_events(&endpoint, Instant::now())?;
-                self.poll_hardware_idle(Instant::now());
+                self.poll_hardware_events(&endpoint, now)?;
+                self.poll_hardware_idle(now);
+                self.poll_hardware_call_status(now);
                 self.telephone.tick();
                 thread::sleep(Duration::from_millis(100));
             }
@@ -278,9 +282,11 @@ impl App {
                 }
                 continue;
             }
+            let now = Instant::now();
             self.poll_network_events();
-            self.poll_hardware_events(&endpoint, Instant::now())?;
-            self.poll_hardware_idle(Instant::now());
+            self.poll_hardware_events(&endpoint, now)?;
+            self.poll_hardware_idle(now);
+            self.poll_hardware_call_status(now);
             match line {
                 "?" | "h" | "help" => print_help_menu(),
                 "q" | "quit" | "exit" => break,
@@ -316,6 +322,7 @@ impl App {
                 },
             }
             self.telephone.tick();
+            self.poll_hardware_call_status(Instant::now());
         }
         Ok(())
     }
@@ -454,7 +461,7 @@ impl App {
         if let Some(link_id) = self.active_link {
             self.start_call_audio(link_id);
         }
-        self.hardware_ui.show_call_connected();
+        self.mark_call_connected_at(Instant::now());
         true
     }
 
@@ -472,6 +479,28 @@ impl App {
         let idle_for = now.saturating_duration_since(self.hardware_last_event);
         self.hardware_ui
             .sleep_if_idle(idle_for, self.telephone.state(), self.telephone.is_busy())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn poll_hardware_call_status(&mut self, now: Instant) -> bool {
+        if self.telephone.state() != CallState::Established {
+            self.call_status_started = None;
+            return false;
+        }
+
+        let started = *self.call_status_started.get_or_insert(now);
+        self.hardware_ui
+            .show_call_connected_for(now.saturating_duration_since(started));
+        true
+    }
+
+    fn mark_call_connected_at(&mut self, now: Instant) {
+        self.call_status_started = Some(now);
+        self.hardware_ui.show_call_connected_for(Duration::ZERO);
+    }
+
+    fn clear_call_status(&mut self) {
+        self.call_status_started = None;
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -506,6 +535,7 @@ impl App {
         }
         self.stop_ringer();
         self.stop_call_audio();
+        self.clear_call_status();
         if let (Some(node), Some(link_id)) = (self.node.as_ref(), self.active_link.take()) {
             let _ = node.teardown_link(link_id);
         }
@@ -544,7 +574,7 @@ impl App {
                     let _ = self.telephone.establish();
                     self.send_signal(Signal::Code(SignalCode::Established));
                     self.start_call_audio(link_id.0);
-                    self.hardware_ui.show_call_connected();
+                    self.mark_call_connected_at(Instant::now());
                     println!("Link {link_id} established to {dest_hash}");
                 } else {
                     println!("Incoming link {link_id} from {dest_hash}");
@@ -555,6 +585,7 @@ impl App {
                     self.active_link = None;
                     self.stop_ringer();
                     self.stop_call_audio();
+                    self.clear_call_status();
                     if self.telephone.state() != CallState::Available {
                         self.telephone.hangup();
                     }
@@ -595,13 +626,14 @@ impl App {
                                     if let Some(link_id) = self.active_link {
                                         self.start_call_audio(link_id);
                                     }
-                                    self.hardware_ui.show_call_connected();
+                                    self.mark_call_connected_at(Instant::now());
                                 }
                             }
                             Signal::Code(SignalCode::Busy | SignalCode::Rejected) => {
                                 if self.telephone.state() == CallState::Available {
                                     self.stop_ringer();
                                     self.stop_call_audio();
+                                    self.clear_call_status();
                                     self.active_link = None;
                                     self.became_available();
                                 }
@@ -1463,9 +1495,10 @@ impl HardwareUi {
         }
     }
 
-    fn show_call_connected(&mut self) {
+    fn show_call_connected_for(&mut self, elapsed: Duration) {
         if let Some(display) = &mut self.display {
             display.print("Call connected", 0, 0);
+            display.print(&pretty_call_duration(elapsed), 0, 1);
         }
     }
 
@@ -1673,6 +1706,39 @@ fn right_align_lcd(value: &str) -> String {
         value.to_string()
     } else {
         format!("{value:>width$}", width = Lcd1602Buffer::COLS)
+    }
+}
+
+fn pretty_call_duration(duration: Duration) -> String {
+    let mut seconds = duration.as_secs();
+    let days = seconds / 86_400;
+    seconds %= 86_400;
+    let hours = seconds / 3_600;
+    seconds %= 3_600;
+    let minutes = seconds / 60;
+    seconds %= 60;
+
+    let mut components = Vec::new();
+    if days > 0 {
+        components.push(format!("{days}d"));
+    }
+    if hours > 0 {
+        components.push(format!("{hours}h"));
+    }
+    if minutes > 0 {
+        components.push(format!("{minutes}m"));
+    }
+    if seconds > 0 {
+        components.push(format!("{seconds}s"));
+    }
+
+    match components.len() {
+        0 => "0s".to_string(),
+        1 => components.remove(0),
+        len => {
+            let last = components.pop().unwrap();
+            format!("{} and {last}", components[..len - 1].join(", "))
+        }
     }
 }
 
@@ -2113,8 +2179,20 @@ mod tests {
         ui.show_calling(Some(1));
         assert_eq!(display_row(&ui, 0), "Calling     (1h)");
 
-        ui.show_call_connected();
+        ui.show_call_connected_for(Duration::from_secs(65));
         assert_eq!(display_row(&ui, 0), "Call connected  ");
+        assert_eq!(display_row(&ui, 1), "1m and 5s       ");
+    }
+
+    #[test]
+    fn call_duration_format_matches_upstream_prettytime_shape() {
+        assert_eq!(pretty_call_duration(Duration::ZERO), "0s");
+        assert_eq!(pretty_call_duration(Duration::from_secs(1)), "1s");
+        assert_eq!(pretty_call_duration(Duration::from_secs(65)), "1m and 5s");
+        assert_eq!(
+            pretty_call_duration(Duration::from_secs(90_061)),
+            "1d, 1h, 1m and 1s"
+        );
     }
 
     #[test]
@@ -2321,6 +2399,7 @@ mod tests {
             active_audio: None,
             active_ringer: None,
             last_dialed: None,
+            call_status_started: None,
             hardware_ui,
             hardware_last_event,
             hardware_events: None,
@@ -2530,6 +2609,25 @@ mod tests {
     }
 
     #[test]
+    fn app_refreshes_hardware_call_duration_while_established() {
+        let mut app = test_app_with_config(display_config());
+        let started = Instant::now();
+        assert!(app.telephone.begin_outgoing_call([0x31; 16]));
+        assert!(app.telephone.establish());
+
+        app.mark_call_connected_at(started);
+        assert_eq!(display_row(&app.hardware_ui, 0), "Call connected  ");
+        assert_eq!(display_row(&app.hardware_ui, 1), "0s              ");
+
+        assert!(app.poll_hardware_call_status(started + Duration::from_secs(65)));
+        assert_eq!(display_row(&app.hardware_ui, 1), "1m and 5s       ");
+
+        app.hangup_current();
+        assert_eq!(app.call_status_started, None);
+        assert_eq!(display_row(&app.hardware_ui, 0), "Telephone Ready ");
+    }
+
+    #[test]
     fn app_polls_hardware_keypad_events_from_channel() {
         let mut app = test_app_with_config(display_config());
         let endpoint = TelephonyEndpoint::new(&app.identity);
@@ -2641,6 +2739,7 @@ mod tests {
         assert_eq!(app.test_started_audio, vec![link_id.0]);
         assert!(app.test_call_audio_running);
         assert_eq!(display_row(&app.hardware_ui, 0), "Call connected  ");
+        assert_eq!(display_row(&app.hardware_ui, 1), "0s              ");
     }
 
     #[test]
