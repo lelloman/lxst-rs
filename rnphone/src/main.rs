@@ -24,6 +24,8 @@ use rns_net::storage::{load_identity, save_identity};
 use rns_net::RnsNode;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+#[cfg_attr(not(test), allow(dead_code))]
+const HW_SLEEP_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn main() {
     if let Err(err) = run(env::args().skip(1).collect()) {
@@ -1134,6 +1136,24 @@ impl HardwareUi {
         }
     }
 
+    fn sleep_if_idle(
+        &mut self,
+        idle_for: Duration,
+        call_state: CallState,
+        telephone_busy: bool,
+    ) -> bool {
+        if call_state == CallState::Available
+            && self.mode == HardwareMode::Idle
+            && !telephone_busy
+            && idle_for >= HW_SLEEP_TIMEOUT
+        {
+            self.sleep();
+            true
+        } else {
+            false
+        }
+    }
+
     fn handle_keypad_event(
         &mut self,
         event: KeypadEvent,
@@ -1697,6 +1717,46 @@ mod tests {
         assert!(!ui.display.as_ref().unwrap().is_sleeping());
         assert_eq!(display_row(&ui, 0), "5               ");
         assert_eq!(display_row(&ui, 1), "Unknown         ");
+    }
+
+    #[test]
+    fn hardware_idle_display_sleeps_after_upstream_timeout() {
+        let mut ui = HardwareUi::new(true);
+        ui.became_available();
+
+        assert!(ui.sleep_if_idle(HW_SLEEP_TIMEOUT, CallState::Available, false));
+
+        assert_eq!(ui.mode, HardwareMode::Sleep);
+        assert!(ui.display.as_ref().unwrap().is_sleeping());
+        assert_eq!(display_row(&ui, 0), "                ");
+        assert_eq!(display_row(&ui, 1), "                ");
+    }
+
+    #[test]
+    fn hardware_idle_sleep_is_guarded_by_state_mode_busy_and_timeout() {
+        let mut ui = HardwareUi::new(true);
+        ui.became_available();
+        assert!(!ui.sleep_if_idle(
+            HW_SLEEP_TIMEOUT - Duration::from_millis(1),
+            CallState::Available,
+            false
+        ));
+        assert_eq!(ui.mode, HardwareMode::Idle);
+
+        ui.handle_keypad_event(
+            key_down('1'),
+            CallState::Available,
+            &RnphoneConfig::default(),
+        );
+        assert!(!ui.sleep_if_idle(HW_SLEEP_TIMEOUT, CallState::Available, false));
+        assert_eq!(ui.mode, HardwareMode::Dial);
+
+        ui.became_available();
+        assert!(!ui.sleep_if_idle(HW_SLEEP_TIMEOUT, CallState::Ringing, false));
+        assert_eq!(ui.mode, HardwareMode::Idle);
+
+        assert!(!ui.sleep_if_idle(HW_SLEEP_TIMEOUT, CallState::Available, true));
+        assert_eq!(ui.mode, HardwareMode::Idle);
     }
 
     #[test]
