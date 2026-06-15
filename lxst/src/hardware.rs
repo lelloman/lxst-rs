@@ -244,3 +244,78 @@ impl Lcd1602Buffer {
 fn blank_lcd_row() -> String {
     " ".repeat(Lcd1602Buffer::COLS)
 }
+
+pub trait Lcd1602Display {
+    fn print(&mut self, value: &str, x: usize, y: usize);
+    fn clear(&mut self);
+    fn sleep(&mut self);
+    fn wake(&mut self);
+    fn is_sleeping(&self) -> bool;
+}
+
+impl Lcd1602Display for Lcd1602Buffer {
+    fn print(&mut self, value: &str, x: usize, y: usize) {
+        Lcd1602Buffer::print(self, value, x, y);
+    }
+
+    fn clear(&mut self) {
+        Lcd1602Buffer::clear(self);
+    }
+
+    fn sleep(&mut self) {
+        Lcd1602Buffer::sleep(self);
+    }
+
+    fn wake(&mut self) {
+        Lcd1602Buffer::wake(self);
+    }
+
+    fn is_sleeping(&self) -> bool {
+        Lcd1602Buffer::is_sleeping(self)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BufferedLcd1602 {
+    buffer: Lcd1602Buffer,
+}
+
+impl BufferedLcd1602 {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn buffer(&self) -> &Lcd1602Buffer {
+        &self.buffer
+    }
+
+    pub fn buffer_mut(&mut self) -> &mut Lcd1602Buffer {
+        &mut self.buffer
+    }
+
+    pub fn into_buffer(self) -> Lcd1602Buffer {
+        self.buffer
+    }
+}
+
+impl Lcd1602Display for BufferedLcd1602 {
+    fn print(&mut self, value: &str, x: usize, y: usize) {
+        self.buffer.print(value, x, y);
+    }
+
+    fn clear(&mut self) {
+        self.buffer.clear();
+    }
+
+    fn sleep(&mut self) {
+        self.buffer.sleep();
+    }
+
+    fn wake(&mut self) {
+        self.buffer.wake();
+    }
+
+    fn is_sleeping(&self) -> bool {
+        self.buffer.is_sleeping()
+    }
+}

@@ -1,4 +1,4 @@
-use lxst::{Key, KeyTransition, Lcd1602Buffer, MatrixKeypad};
+use lxst::{BufferedLcd1602, Key, KeyTransition, Lcd1602Buffer, Lcd1602Display, MatrixKeypad};
 
 #[test]
 fn keypad_4x4_layout_matches_python_driver() {
@@ -114,4 +114,40 @@ fn lcd1602_buffer_print_clear_sleep_and_wake_match_driver_shape() {
     lcd.clear();
     assert_eq!(lcd.row(0), Some("                "));
     assert_eq!(lcd.row(1), Some("                "));
+}
+
+#[test]
+fn lcd1602_buffer_implements_display_backend_contract() {
+    let mut display: Box<dyn Lcd1602Display> = Box::new(Lcd1602Buffer::new());
+
+    display.print("Ready", 0, 0);
+    display.sleep();
+    assert!(display.is_sleeping());
+    display.wake();
+    assert!(!display.is_sleeping());
+    display.clear();
+}
+
+#[test]
+fn buffered_lcd1602_exposes_buffered_backend_for_tests_and_platform_adapters() {
+    let mut display = BufferedLcd1602::new();
+
+    drive_ready_display(&mut display);
+
+    assert_eq!(display.buffer().row(0), Some("Telephone Ready "));
+    assert_eq!(display.buffer().row(1), Some("                "));
+
+    display.sleep();
+    assert!(display.is_sleeping());
+    assert!(display.buffer().is_sleeping());
+
+    display.print("Wake", 0, 0);
+    assert_eq!(display.buffer().row(0), Some("Wake            "));
+    assert!(!display.is_sleeping());
+}
+
+fn drive_ready_display(display: &mut dyn Lcd1602Display) {
+    display.clear();
+    display.print("Telephone Ready", 0, 0);
+    display.print("", 0, 1);
 }
