@@ -53,6 +53,30 @@ fn raw_codec_rejects_truncated_f16_payloads() {
 }
 
 #[test]
+fn raw_codec_rejects_float128_with_explicit_policy() {
+    let frame = AudioFrame::new(48_000, 1, vec![0.25]).unwrap();
+    let mut encoder = RawCodec::new(RawBitDepth::Float128);
+    let encode_error = encoder.encode(&frame).unwrap_err();
+    assert!(
+        encode_error
+            .to_string()
+            .contains("platform-specific float128 layout"),
+        "{encode_error}"
+    );
+
+    let mut decoder = RawCodec::new(RawBitDepth::Float32);
+    let mut encoded = vec![0xc0];
+    encoded.extend_from_slice(&[0; 16]);
+    let decode_error = decoder.decode(&encoded, 48_000).unwrap_err();
+    assert!(
+        decode_error
+            .to_string()
+            .contains("platform-specific float128 layout"),
+        "{decode_error}"
+    );
+}
+
+#[test]
 fn raw_codec_fixed_channels_duplicates_missing_channels_like_python() {
     let frame = AudioFrame::new(48_000, 1, vec![0.25, -0.5]).unwrap();
     let mut codec = RawCodec::with_channels(RawBitDepth::Float32, 2);

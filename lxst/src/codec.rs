@@ -100,7 +100,7 @@ impl AudioCodec for RawCodec {
             }
             RawBitDepth::Float128 => {
                 return Err(CodecError::Unsupported(format!(
-                    "raw {}-bit samples are not implemented",
+                    "raw {}-bit samples use NumPy's platform-specific float128 layout",
                     self.bit_depth.bits()
                 )));
             }
@@ -145,7 +145,7 @@ impl AudioCodec for RawCodec {
             }
             RawBitDepth::Float128 => {
                 return Err(CodecError::Unsupported(format!(
-                    "raw {}-bit samples are not implemented",
+                    "raw {}-bit samples use NumPy's platform-specific float128 layout",
                     header.bit_depth.bits()
                 )));
             }
