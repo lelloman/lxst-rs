@@ -34,6 +34,8 @@ cargo run -p lxst --example tone_generator
 cargo run -p lxst --example filters
 cargo run -p lxst --example mixer
 cargo run -p lxst --example pipelines
+cargo run -p lxst --example file_source -- input.opus output.opus
+cargo run -p lxst --example call_calculator
 cargo run -p lxst --example file_player -- path/to/audio.opus
 cargo run -p lxst --example file_player -- path/to/audio.opus --loop
 cargo run -p lxst --example file_recorder -- recording.opus
