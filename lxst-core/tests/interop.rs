@@ -405,6 +405,45 @@ fn rejects_empty_or_unknown_codec_frames() {
 }
 
 #[test]
+fn rejects_malformed_packet_roots_and_trailing_bytes() {
+    assert!(LxstPacket::decode(&pack(&Value::UInt(1))).is_err());
+
+    let mut with_trailing = pack(&Value::Map(vec![]));
+    with_trailing.push(0x00);
+    assert!(LxstPacket::decode(&with_trailing).is_err());
+}
+
+#[test]
+fn rejects_malformed_signalling_values() {
+    let string_signal = Value::Map(vec![(
+        Value::UInt(FIELD_SIGNALLING as u64),
+        Value::Str("ringing".to_string()),
+    )]);
+    assert!(LxstPacket::decode(&pack(&string_signal)).is_err());
+
+    let negative_signal = Value::Map(vec![(Value::UInt(FIELD_SIGNALLING as u64), Value::Int(-1))]);
+    assert!(LxstPacket::decode(&pack(&negative_signal)).is_err());
+}
+
+#[test]
+fn rejects_malformed_frame_values() {
+    let scalar_frame = Value::Map(vec![(
+        Value::UInt(FIELD_FRAMES as u64),
+        Value::UInt(CodecHeader::Opus.as_u8() as u64),
+    )]);
+    assert!(LxstPacket::decode(&pack(&scalar_frame)).is_err());
+
+    let mixed_frame_list = Value::Map(vec![(
+        Value::UInt(FIELD_FRAMES as u64),
+        Value::Array(vec![
+            Value::Bin(vec![CodecHeader::Opus.as_u8(), 0xaa]),
+            Value::Str("not-frame-bytes".to_string()),
+        ]),
+    )]);
+    assert!(LxstPacket::decode(&pack(&mixed_frame_list)).is_err());
+}
+
+#[test]
 fn encoded_packet_round_trip_preserves_values() {
     let packet = LxstPacket {
         signals: vec![
