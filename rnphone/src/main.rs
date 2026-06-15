@@ -15,8 +15,8 @@ use lxst::{
     Agc, AudioCodec, AudioSink, AudioSource, BandPass, CallProfile, CallState, CodecFactory,
     CodecSelection, CpalInputConfig, CpalInputSource, CpalOutputConfig, CpalOutputSink,
     EncodedAudioFrame, Key, KeyTransition, KeypadEvent, Lcd1602Buffer, LxstPacket, MatrixKeypad,
-    OpusFileSource, Signal, SignalCode, SourcePlayer, Telephone, TelephoneConfig,
-    TelephonyNetworkEvent,
+    MatrixKeypadBackend, MatrixKeypadPoller, MatrixKeypadScanner, OpusFileSource, Signal,
+    SignalCode, SourcePlayer, Telephone, TelephoneConfig, TelephonyNetworkEvent,
 };
 use rns_crypto::identity::Identity;
 use rns_crypto::OsRng;
@@ -147,6 +147,8 @@ struct App {
     last_dialed: Option<[u8; 16]>,
     hardware_ui: HardwareUi,
     hardware_last_event: Instant,
+    hardware_events: Option<mpsc::Receiver<KeypadEvent>>,
+    hardware_poller: Option<MatrixKeypadPoller>,
     #[cfg(test)]
     test_sent_signals: Vec<([u8; 16], Signal)>,
     #[cfg(test)]
@@ -189,6 +191,7 @@ impl App {
         config.finalize_for_identity(identity.hash());
         let hardware_ui = HardwareUi::from_config(&config.hardware)?;
         let hardware_last_event = Instant::now();
+        let (hardware_events, hardware_poller) = start_hardware_keypad(&config.hardware)?;
 
         let telephone_config = TelephoneConfig {
             allowed_callers: config.allowed_callers.clone(),
@@ -211,6 +214,8 @@ impl App {
             last_dialed: None,
             hardware_ui,
             hardware_last_event,
+            hardware_events,
+            hardware_poller,
             #[cfg(test)]
             test_sent_signals: Vec::new(),
             #[cfg(test)]
@@ -239,6 +244,7 @@ impl App {
             self.became_available();
             loop {
                 self.poll_network_events();
+                self.poll_hardware_events(&endpoint, Instant::now())?;
                 self.poll_hardware_idle(Instant::now());
                 self.telephone.tick();
                 thread::sleep(Duration::from_millis(100));
@@ -265,6 +271,7 @@ impl App {
                 continue;
             }
             self.poll_network_events();
+            self.poll_hardware_events(&endpoint, Instant::now())?;
             self.poll_hardware_idle(Instant::now());
             match line {
                 "?" | "h" | "help" => print_help_menu(),
@@ -451,6 +458,32 @@ impl App {
         let idle_for = now.saturating_duration_since(self.hardware_last_event);
         self.hardware_ui
             .sleep_if_idle(idle_for, self.telephone.state(), self.telephone.is_busy())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn poll_hardware_events(
+        &mut self,
+        endpoint: &TelephonyEndpoint,
+        now: Instant,
+    ) -> Result<usize, String> {
+        if self.hardware_poller.is_none() && self.hardware_events.is_none() {
+            return Ok(0);
+        }
+
+        let Some(events) = self.hardware_events.take() else {
+            return Ok(0);
+        };
+        let mut pending = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            pending.push(event);
+        }
+        self.hardware_events = Some(events);
+
+        let handled = pending.len();
+        for event in pending {
+            self.handle_hardware_keypad_event_at(endpoint, event, now)?;
+        }
+        Ok(handled)
     }
 
     fn hangup_current(&mut self) {
@@ -924,6 +957,51 @@ impl HardwareConfig {
             Some("i2c_lcd1602") => Ok(true),
             Some(driver) => Err(format!("unknown display driver {driver}")),
         }
+    }
+}
+
+fn start_hardware_keypad(
+    config: &HardwareConfig,
+) -> Result<
+    (
+        Option<mpsc::Receiver<KeypadEvent>>,
+        Option<MatrixKeypadPoller>,
+    ),
+    String,
+> {
+    let Some(keypad) = config.keypad_matrix()? else {
+        return Ok((None, None));
+    };
+
+    let (tx, rx) = mpsc::channel();
+    let scanner = MatrixKeypadScanner::new(
+        keypad,
+        NoopKeypadBackend {
+            hook_enabled: config.keypad_hook_pin.is_some(),
+        },
+    );
+    let poller = MatrixKeypadPoller::start(
+        scanner,
+        Duration::from_millis(MatrixKeypad::SCAN_INTERVAL_MS),
+        move |event| {
+            let _ = tx.send(event);
+        },
+    );
+    Ok((Some(rx), Some(poller)))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NoopKeypadBackend {
+    hook_enabled: bool,
+}
+
+impl MatrixKeypadBackend for NoopKeypadBackend {
+    fn read_col(&mut self, _row: usize, _col: usize) -> bool {
+        false
+    }
+
+    fn hook_on(&mut self) -> Option<bool> {
+        self.hook_enabled.then_some(false)
     }
 }
 
@@ -1970,6 +2048,8 @@ mod tests {
             last_dialed: None,
             hardware_ui,
             hardware_last_event,
+            hardware_events: None,
+            hardware_poller: None,
             test_sent_signals: Vec::new(),
             test_started_audio: Vec::new(),
             test_call_audio_running: false,
@@ -2172,6 +2252,37 @@ mod tests {
         assert_eq!(app.hardware_ui.mode, HardwareMode::Idle);
         assert!(!app.hardware_ui.display.as_ref().unwrap().is_sleeping());
         assert!(!app.poll_hardware_idle(start + Duration::from_secs(20)));
+    }
+
+    #[test]
+    fn app_polls_hardware_keypad_events_from_channel() {
+        let mut app = test_app_with_config(display_config());
+        let endpoint = TelephonyEndpoint::new(&app.identity);
+        let (tx, rx) = mpsc::channel();
+        app.hardware_events = Some(rx);
+        tx.send(key_down('7')).unwrap();
+
+        let handled = app.poll_hardware_events(&endpoint, Instant::now()).unwrap();
+
+        assert_eq!(handled, 1);
+        assert_eq!(app.hardware_ui.mode, HardwareMode::Dial);
+        assert_eq!(app.hardware_ui.input, "7");
+        assert_eq!(display_row(&app.hardware_ui, 0), "7               ");
+    }
+
+    #[test]
+    fn configured_keypad_starts_host_noop_event_channel() {
+        let config =
+            RnphoneConfig::parse("[hardware]\nkeypad = gpio_4x4\nkeypad_hook_pin = 5\n").unwrap();
+
+        let (events, poller) = start_hardware_keypad(&config.hardware).unwrap();
+
+        assert!(events
+            .as_ref()
+            .unwrap()
+            .recv_timeout(Duration::from_millis(50))
+            .is_err());
+        assert!(poller.is_some());
     }
 
     #[test]
