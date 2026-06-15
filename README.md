@@ -47,6 +47,11 @@ The Python project is early alpha and explicitly API-unstable, so this port
 tracks behavior and wire format deliberately instead of copying incidental
 Python APIs.
 
+## rnphone
+
+`rnphone` operation notes, config examples, and service commands are documented
+in [rnphone/README.md](./rnphone/README.md).
+
 ## Development Checks
 
 ```bash
