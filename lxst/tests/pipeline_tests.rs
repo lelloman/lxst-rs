@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use lxst::{
     AudioCodec, AudioSink, AudioSource, BufferedSink, BufferedSource, EncodedAudioFrame,
-    EncodedMixerSink, Loopback, Mixer, MixerRuntime, Pipeline, PipelineError, PipelineRunner,
-    RawBitDepth, RawCodec, ToneSource,
+    EncodedMixerSink, Loopback, Mixer, MixerInputSink, MixerRuntime, Pipeline, PipelineError,
+    PipelineRunner, RawBitDepth, RawCodec, ToneSource,
 };
 use lxst_core::{CodecKind, CodecProfile};
 
@@ -270,6 +270,41 @@ fn mixer_runtime_can_feed_encoded_sink() {
 }
 
 #[test]
+fn pipeline_can_feed_shared_mixer_runtime() {
+    let mixer = Arc::new(Mutex::new(Mixer::default()));
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let sink = CollectingFrameSink {
+        frames: Arc::clone(&frames),
+    };
+    let mut runtime =
+        MixerRuntime::start_shared(Arc::clone(&mixer), sink, Duration::from_millis(1));
+
+    let mut source = BufferedSource::new(8_000, 1).unwrap();
+    source
+        .push_frame(lxst::AudioFrame::new(8_000, 1, vec![0.25]).unwrap())
+        .unwrap();
+    let mut pipeline = Pipeline::new(
+        Box::new(source),
+        Box::new(RawCodec::new(RawBitDepth::Float32)),
+        Box::new(MixerInputSink::new(
+            Arc::clone(&mixer),
+            7,
+            Box::new(RawCodec::new(RawBitDepth::Float32)),
+        )),
+    );
+
+    pipeline.start();
+    assert!(pipeline.process_next().unwrap());
+    wait_for(|| frames.lock().unwrap().len() == 1);
+    runtime.stop().unwrap();
+
+    let frames = frames.lock().unwrap();
+    assert_eq!(frames[0].samplerate(), 8_000);
+    assert_eq!(frames[0].channels(), 1);
+    assert_eq!(frames[0].samples(), &[0.25]);
+}
+
+#[test]
 fn encoded_mixer_sink_delegates_backpressure() {
     let accepting = Arc::new(AtomicBool::new(false));
     let sink = GatedSink {
@@ -320,6 +355,17 @@ impl AudioSink for GatedSink {
         if !self.can_receive() {
             return Err(PipelineError::SinkFull);
         }
+        self.frames.lock().unwrap().push(frame);
+        Ok(())
+    }
+}
+
+struct CollectingFrameSink {
+    frames: Arc<Mutex<Vec<lxst::AudioFrame>>>,
+}
+
+impl lxst::MixerSink for CollectingFrameSink {
+    fn handle_frame(&mut self, frame: lxst::AudioFrame) -> Result<(), lxst::AudioError> {
         self.frames.lock().unwrap().push(frame);
         Ok(())
     }

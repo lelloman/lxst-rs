@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use lxst_core::CodecKind;
 
-use crate::audio::{AudioError, AudioFrame, MixerSink};
+use crate::audio::{AudioError, AudioFrame, Mixer, MixerSink};
 use crate::codec::{AudioCodec, CodecError};
 use crate::network::NetworkError;
 
@@ -206,6 +206,56 @@ where
         self.sink
             .handle_frame(encoded)
             .map_err(|err| AudioError::Stream(err.to_string()))
+    }
+}
+
+pub struct MixerInputSink {
+    mixer: Arc<Mutex<Mixer>>,
+    source_id: u64,
+    codec: Box<dyn AudioCodec>,
+}
+
+impl MixerInputSink {
+    pub fn new(mixer: Arc<Mutex<Mixer>>, source_id: u64, codec: Box<dyn AudioCodec>) -> Self {
+        Self {
+            mixer,
+            source_id,
+            codec,
+        }
+    }
+
+    pub fn mixer(&self) -> Arc<Mutex<Mixer>> {
+        Arc::clone(&self.mixer)
+    }
+
+    pub fn source_id(&self) -> u64 {
+        self.source_id
+    }
+
+    pub fn codec(&self) -> &dyn AudioCodec {
+        self.codec.as_ref()
+    }
+}
+
+impl AudioSink for MixerInputSink {
+    fn can_receive(&self) -> bool {
+        self.mixer
+            .lock()
+            .map(|mixer| mixer.can_receive(self.source_id))
+            .unwrap_or(false)
+    }
+
+    fn handle_frame(&mut self, frame: EncodedAudioFrame) -> Result<(), PipelineError> {
+        let decoded = self.codec.decode(&frame.payload, frame.samplerate)?;
+        let mut mixer = self
+            .mixer
+            .lock()
+            .map_err(|err| PipelineError::Synchronization(err.to_string()))?;
+        if !mixer.can_receive(self.source_id) {
+            return Err(PipelineError::SinkFull);
+        }
+        mixer.push(self.source_id, decoded);
+        Ok(())
     }
 }
 

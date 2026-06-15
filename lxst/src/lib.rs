@@ -32,7 +32,7 @@ pub use network::{
 };
 pub use pipeline::{
     AudioSink, AudioSource, BufferedSink, BufferedSource, EncodedAudioFrame, EncodedMixerSink,
-    Loopback, Pipeline, PipelineError, PipelineRunner,
+    Loopback, MixerInputSink, Pipeline, PipelineError, PipelineRunner,
 };
 
 pub use lxst_core::{
