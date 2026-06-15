@@ -1,14 +1,14 @@
 use std::fs;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lxst::{
     AudioFrame, AudioFrameSink, AudioSource, MediaError, OpusFileSink, OpusFileSource,
-    QueuedOpusFileSink, QueuedOpusFileSinkConfig, SourcePlayer, SourceRecorder,
+    QueuedOpusFileSink, QueuedOpusFileSinkConfig, SourcePlayer, SourcePlayerRunner, SourceRecorder,
 };
 use lxst_core::CodecProfile;
 
@@ -276,6 +276,47 @@ fn source_player_calls_finished_callback_once_on_manual_stop() {
 }
 
 #[test]
+fn source_player_runner_drains_until_eof() {
+    let frames = vec![
+        AudioFrame::new(48_000, 2, vec![0.0; 960 * 2]).unwrap(),
+        AudioFrame::new(48_000, 2, vec![0.25; 960 * 2]).unwrap(),
+    ];
+    let source = FakeMediaSource::new(48_000, 2, frames);
+    let sink = SharedFrameSink::new(true);
+    let received = Arc::clone(&sink.frames);
+    let running = Arc::clone(&sink.running);
+    let player = SourcePlayer::new(source, sink);
+    let mut runner = SourcePlayerRunner::start(player, Duration::from_millis(1)).unwrap();
+
+    wait_for(|| received.lock().unwrap().len() == 2 && !runner.is_running());
+
+    runner.stop().unwrap();
+    assert_eq!(received.lock().unwrap().len(), 2);
+    assert!(!running.load(Ordering::SeqCst));
+}
+
+#[test]
+fn source_player_runner_stop_stops_backpressured_player() {
+    let source = FakeMediaSource::new(
+        48_000,
+        2,
+        vec![AudioFrame::new(48_000, 2, vec![0.0; 960 * 2]).unwrap()],
+    );
+    let sink = SharedFrameSink::new(false);
+    let received = Arc::clone(&sink.frames);
+    let running = Arc::clone(&sink.running);
+    let player = SourcePlayer::new(source, sink);
+    let mut runner = SourcePlayerRunner::start(player, Duration::from_millis(1)).unwrap();
+
+    wait_for(|| runner.is_running());
+    runner.stop().unwrap();
+
+    assert!(received.lock().unwrap().is_empty());
+    assert!(!running.load(Ordering::SeqCst));
+    assert!(!runner.is_running());
+}
+
+#[test]
 fn source_recorder_obeys_sink_backpressure_before_pulling() {
     let path = temp_opus_path("source-recorder-backpressure");
     let frame = AudioFrame::new(48_000, 2, vec![0.0; 960 * 2]).unwrap();
@@ -360,6 +401,43 @@ impl AudioFrameSink for FakeFrameSink {
 
     fn handle_frame(&mut self, frame: AudioFrame) -> Result<(), MediaError> {
         self.frames.push(frame);
+        Ok(())
+    }
+}
+
+struct SharedFrameSink {
+    can_receive: bool,
+    running: Arc<AtomicBool>,
+    frames: Arc<Mutex<Vec<AudioFrame>>>,
+}
+
+impl SharedFrameSink {
+    fn new(can_receive: bool) -> Self {
+        Self {
+            can_receive,
+            running: Arc::new(AtomicBool::new(false)),
+            frames: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl AudioFrameSink for SharedFrameSink {
+    fn start(&mut self) -> Result<(), MediaError> {
+        self.running.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), MediaError> {
+        self.running.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn can_receive(&self) -> bool {
+        self.can_receive
+    }
+
+    fn handle_frame(&mut self, frame: AudioFrame) -> Result<(), MediaError> {
+        self.frames.lock().unwrap().push(frame);
         Ok(())
     }
 }

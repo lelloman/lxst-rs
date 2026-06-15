@@ -780,6 +780,91 @@ where
     }
 }
 
+pub struct SourcePlayerRunner<S, K>
+where
+    S: AudioSource + 'static,
+    K: AudioFrameSink + Send + 'static,
+{
+    stop_requested: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    worker: Option<JoinHandle<Result<(), MediaError>>>,
+    _source: std::marker::PhantomData<S>,
+    _sink: std::marker::PhantomData<K>,
+}
+
+impl<S, K> SourcePlayerRunner<S, K>
+where
+    S: AudioSource + 'static,
+    K: AudioFrameSink + Send + 'static,
+{
+    pub fn start(
+        mut player: SourcePlayer<S, K>,
+        poll_interval: Duration,
+    ) -> Result<Self, MediaError> {
+        player.start()?;
+
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let running = Arc::new(AtomicBool::new(true));
+        let worker_stop = Arc::clone(&stop_requested);
+        let worker_running = Arc::clone(&running);
+
+        let worker = thread::spawn(move || {
+            let result = loop {
+                if worker_stop.load(Ordering::SeqCst) || !player.is_playing() {
+                    break Ok(());
+                }
+
+                match player.process_next() {
+                    Ok(true) => {}
+                    Ok(false) => thread::sleep(poll_interval),
+                    Err(error) => break Err(error),
+                }
+            };
+
+            let stop_result = player.stop();
+            worker_running.store(false, Ordering::SeqCst);
+            result.and(stop_result)
+        });
+
+        Ok(Self {
+            stop_requested,
+            running,
+            worker: Some(worker),
+            _source: std::marker::PhantomData,
+            _sink: std::marker::PhantomData,
+        })
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    pub fn stop(&mut self) -> Result<(), MediaError> {
+        self.stop_requested.store(true, Ordering::SeqCst);
+        let Some(worker) = self.worker.take() else {
+            self.running.store(false, Ordering::SeqCst);
+            return Ok(());
+        };
+
+        let result = worker.join();
+        self.running.store(false, Ordering::SeqCst);
+        match result {
+            Ok(result) => result,
+            Err(_) => Err(MediaError::WorkerPanic),
+        }
+    }
+}
+
+impl<S, K> Drop for SourcePlayerRunner<S, K>
+where
+    S: AudioSource + 'static,
+    K: AudioFrameSink + Send + 'static,
+{
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
 pub struct FilePlayer {
     inner: SourcePlayer<OpusFileSource, CpalOutputSink>,
 }

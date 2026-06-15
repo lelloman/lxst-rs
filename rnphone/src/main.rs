@@ -24,7 +24,7 @@ use lxst::{
     CodecSelection, CpalInputConfig, CpalInputSource, CpalOutputConfig, CpalOutputSink,
     EncodedAudioFrame, Key, KeyTransition, KeypadEvent, Lcd1602Buffer, LxstPacket, MatrixKeypad,
     MatrixKeypadPoller, MatrixKeypadScanner, OpusFileSource, Signal, SignalCode, SourcePlayer,
-    Telephone, TelephoneConfig, TelephonyNetworkEvent,
+    SourcePlayerRunner, Telephone, TelephoneConfig, TelephonyNetworkEvent,
 };
 use rns_crypto::identity::Identity;
 use rns_crypto::OsRng;
@@ -761,8 +761,7 @@ impl App {
 
 #[cfg_attr(test, allow(dead_code))]
 struct RingerAudio {
-    stop_tx: mpsc::Sender<()>,
-    worker: Option<JoinHandle<()>>,
+    runner: SourcePlayerRunner<OpusFileSource, CpalOutputSink>,
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -774,32 +773,15 @@ impl RingerAudio {
             ..CpalOutputConfig::default()
         })
         .map_err(|e| e.to_string())?;
-        let mut player = SourcePlayer::new(source, sink);
-        player.start().map_err(|e| e.to_string())?;
+        let player = SourcePlayer::new(source, sink);
+        let runner = SourcePlayerRunner::start(player, Duration::from_millis(10))
+            .map_err(|e| e.to_string())?;
 
-        let (stop_tx, stop_rx) = mpsc::channel();
-        let worker = thread::spawn(move || {
-            while stop_rx.try_recv().is_err() {
-                if let Err(err) = player.process_next() {
-                    eprintln!("rnphone ringer: {err}");
-                    break;
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-            let _ = player.stop();
-        });
-
-        Ok(Self {
-            stop_tx,
-            worker: Some(worker),
-        })
+        Ok(Self { runner })
     }
 
     fn stop(&mut self) {
-        let _ = self.stop_tx.send(());
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+        let _ = self.runner.stop();
     }
 }
 

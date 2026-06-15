@@ -30,7 +30,7 @@ pub use hardware::{
 pub use hardware::{RpiI2cLcd1602, RpiMatrixKeypadBackend};
 pub use media::{
     AudioFrameSink, FilePlayer, FileRecorder, MediaError, OpusFileSink, OpusFileSource,
-    QueuedOpusFileSink, QueuedOpusFileSinkConfig, SourcePlayer, SourceRecorder,
+    QueuedOpusFileSink, QueuedOpusFileSinkConfig, SourcePlayer, SourcePlayerRunner, SourceRecorder,
 };
 pub use network::{
     telephony_callback_channel, LinkSource, LxstLinkSender, NetworkError, PacketSender, Packetizer,
