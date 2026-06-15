@@ -569,14 +569,22 @@ impl App {
                 is_initiator,
                 ..
             } => {
-                self.active_link = Some(link_id.0);
                 if is_initiator {
+                    self.active_link = Some(link_id.0);
                     let _ = self.telephone.establish();
                     self.send_signal(Signal::Code(SignalCode::Established));
                     self.start_call_audio(link_id.0);
                     self.mark_call_connected_at(Instant::now());
                     println!("Link {link_id} established to {dest_hash}");
+                } else if self.telephone.is_busy() || self.active_link.is_some() {
+                    self.send_signal_to(link_id.0, Signal::Code(SignalCode::Busy));
+                    if let Some(node) = self.node.as_ref() {
+                        let _ = node.teardown_link(link_id.0);
+                    }
+                    println!("Incoming link {link_id} rejected as busy");
                 } else {
+                    self.active_link = Some(link_id.0);
+                    self.send_signal_to(link_id.0, Signal::Code(SignalCode::Available));
                     println!("Incoming link {link_id} from {dest_hash}");
                 }
             }
@@ -742,7 +750,7 @@ impl App {
         let Some(link_id) = self.active_link else {
             return;
         };
-        self.test_sent_signals.push((link_id, signal));
+        self.send_signal_to(link_id, signal);
     }
 
     #[cfg(not(test))]
@@ -750,6 +758,24 @@ impl App {
         let (Some(node), Some(link_id)) = (self.node.clone(), self.active_link) else {
             return;
         };
+        Self::send_signal_to_node(node, link_id, signal);
+    }
+
+    #[cfg(test)]
+    fn send_signal_to(&mut self, link_id: [u8; 16], signal: Signal) {
+        self.test_sent_signals.push((link_id, signal));
+    }
+
+    #[cfg(not(test))]
+    fn send_signal_to(&mut self, link_id: [u8; 16], signal: Signal) {
+        let Some(node) = self.node.clone() else {
+            return;
+        };
+        Self::send_signal_to_node(node, link_id, signal);
+    }
+
+    #[cfg(not(test))]
+    fn send_signal_to_node(node: Arc<RnsNode>, link_id: [u8; 16], signal: Signal) {
         let sender = LxstLinkSender::new(node, link_id);
         let _ = sender.send_signal(signal);
     }
@@ -2670,14 +2696,38 @@ mod tests {
         app.handle_network_event(established_link_event(link_id, false));
         assert_eq!(app.active_link, Some(link_id.0));
         assert_eq!(app.telephone.state(), CallState::Available);
-        assert!(app.test_sent_signals.is_empty());
+        assert_eq!(
+            app.test_sent_signals,
+            vec![(link_id.0, Signal::Code(SignalCode::Available))]
+        );
 
         app.handle_network_event(remote_identified_event(link_id, caller));
         assert_eq!(app.active_link, Some(link_id.0));
         assert_eq!(app.telephone.state(), CallState::Ringing);
         assert_eq!(
             app.test_sent_signals,
-            vec![(link_id.0, Signal::Code(SignalCode::Ringing))]
+            vec![
+                (link_id.0, Signal::Code(SignalCode::Available)),
+                (link_id.0, Signal::Code(SignalCode::Ringing)),
+            ]
+        );
+    }
+
+    #[test]
+    fn inbound_link_established_while_busy_sends_busy_without_stealing_active_link() {
+        let mut app = test_app();
+        let active_link = link_id(0x34);
+        let new_link = link_id(0x35);
+        app.active_link = Some(active_link.0);
+        assert!(app.telephone.begin_outgoing_call([0x36; 16]));
+
+        app.handle_network_event(established_link_event(new_link, false));
+
+        assert_eq!(app.active_link, Some(active_link.0));
+        assert_eq!(app.telephone.state(), CallState::Calling);
+        assert_eq!(
+            app.test_sent_signals,
+            vec![(new_link.0, Signal::Code(SignalCode::Busy))]
         );
     }
 
