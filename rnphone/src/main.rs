@@ -14,8 +14,8 @@ use lxst::network::{
 use lxst::{
     Agc, AudioCodec, AudioSink, AudioSource, BandPass, CallProfile, CallState, CodecFactory,
     CodecSelection, CpalInputConfig, CpalInputSource, CpalOutputConfig, CpalOutputSink,
-    EncodedAudioFrame, LxstPacket, OpusFileSource, Signal, SignalCode, SourcePlayer, Telephone,
-    TelephoneConfig, TelephonyNetworkEvent,
+    EncodedAudioFrame, Key, KeyTransition, KeypadEvent, Lcd1602Buffer, LxstPacket, OpusFileSource,
+    Signal, SignalCode, SourcePlayer, Telephone, TelephoneConfig, TelephonyNetworkEvent,
 };
 use rns_crypto::identity::Identity;
 use rns_crypto::OsRng;
@@ -964,6 +964,14 @@ impl RnphoneConfig {
             }
         })
     }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn resolve_dial_alias_name(&self, input: &str) -> Option<&str> {
+        self.phonebook_order.iter().find_map(|name| {
+            let entry = self.phonebook.get(name)?;
+            (entry.alias.as_deref() == Some(input)).then_some(name.as_str())
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -976,6 +984,179 @@ struct PhonebookEntry {
 struct DialTarget {
     label: String,
     identity_hash: [u8; 16],
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HardwareMode {
+    Idle,
+    Dial,
+    Sleep,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HardwareAction {
+    None,
+    Answer,
+    Reject,
+    Hangup,
+    Dial([u8; 16]),
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HardwareUi {
+    mode: HardwareMode,
+    input: String,
+    display: Option<Lcd1602Buffer>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl HardwareUi {
+    fn new(display_enabled: bool) -> Self {
+        Self {
+            mode: HardwareMode::Idle,
+            input: String::new(),
+            display: display_enabled.then(Lcd1602Buffer::new),
+        }
+    }
+
+    fn became_available(&mut self) {
+        if let Some(display) = &mut self.display {
+            display.clear();
+            display.print("Telephone Ready", 0, 0);
+            display.print("", 0, 1);
+        }
+        self.input.clear();
+        self.mode = HardwareMode::Idle;
+    }
+
+    fn sleep(&mut self) {
+        self.mode = HardwareMode::Sleep;
+        if let Some(display) = &mut self.display {
+            display.sleep();
+        }
+    }
+
+    fn handle_keypad_event(
+        &mut self,
+        event: KeypadEvent,
+        call_state: CallState,
+        config: &RnphoneConfig,
+    ) -> HardwareAction {
+        if self.mode == HardwareMode::Sleep {
+            self.became_available();
+        }
+
+        match call_state {
+            CallState::Ringing => {
+                if is_key_down(event, 'D') || is_hook_up(event) {
+                    HardwareAction::Answer
+                } else if is_key_down(event, 'C') {
+                    HardwareAction::Reject
+                } else {
+                    HardwareAction::None
+                }
+            }
+            CallState::Calling | CallState::Connecting | CallState::Established => {
+                if is_key_down(event, 'D') || is_hook_down(event) {
+                    HardwareAction::Hangup
+                } else {
+                    HardwareAction::None
+                }
+            }
+            CallState::Available if self.mode == HardwareMode::Idle => {
+                if is_key_down(event, 'A') {
+                    self.input.clear();
+                    self.mode = HardwareMode::Dial;
+                    self.update_display(config);
+                } else if let Some(digit) = down_digit(event) {
+                    self.input.push(digit);
+                    self.mode = HardwareMode::Dial;
+                    self.update_display(config);
+                }
+                HardwareAction::None
+            }
+            CallState::Available if self.mode == HardwareMode::Dial => {
+                let mut dial_event = false;
+                if event.transition == KeyTransition::Down {
+                    match event.key {
+                        Key::Char(ch) if ch.is_ascii_digit() => self.input.push(ch),
+                        Key::Char('A') => self.became_available(),
+                        Key::Char('B') => {
+                            self.input.pop();
+                        }
+                        Key::Char('C') => self.input.clear(),
+                        Key::Char('D') => dial_event = true,
+                        _ => {}
+                    }
+                }
+                if is_hook_up(event) {
+                    dial_event = true;
+                }
+
+                if dial_event {
+                    if let Some(target) = config.resolve_dial_target(&self.input) {
+                        self.input.clear();
+                        self.mode = HardwareMode::Idle;
+                        return HardwareAction::Dial(target.identity_hash);
+                    }
+                }
+
+                self.update_display(config);
+                HardwareAction::None
+            }
+            _ => HardwareAction::None,
+        }
+    }
+
+    fn update_display(&mut self, config: &RnphoneConfig) {
+        if self.mode != HardwareMode::Dial {
+            return;
+        }
+
+        let Some(display) = &mut self.display else {
+            return;
+        };
+        let lookup_name = if self.input.is_empty() {
+            "Enter number".to_string()
+        } else {
+            config
+                .resolve_dial_alias_name(&self.input)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| "Unknown".to_string())
+        };
+
+        display.print(&self.input, 0, 0);
+        display.print(&lookup_name, 0, 1);
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn down_digit(event: KeypadEvent) -> Option<char> {
+    match event {
+        KeypadEvent {
+            key: Key::Char(ch),
+            transition: KeyTransition::Down,
+        } if ch.is_ascii_digit() => Some(ch),
+        _ => None,
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn is_key_down(event: KeypadEvent, key: char) -> bool {
+    event.key == Key::Char(key) && event.transition == KeyTransition::Down
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn is_hook_down(event: KeypadEvent) -> bool {
+    event.key == Key::Hook && event.transition == KeyTransition::Down
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn is_hook_up(event: KeypadEvent) -> bool {
+    event.key == Key::Hook && event.transition == KeyTransition::Up
 }
 
 fn parse_allowed_callers(value: &str) -> Result<lxst::CallerPolicy, String> {
@@ -1254,6 +1435,148 @@ mod tests {
     }
 
     #[test]
+    fn hardware_ready_display_matches_upstream() {
+        let mut ui = HardwareUi::new(true);
+
+        ui.became_available();
+
+        assert_eq!(ui.mode, HardwareMode::Idle);
+        assert_eq!(ui.input, "");
+        assert_eq!(display_row(&ui, 0), "Telephone Ready ");
+        assert_eq!(display_row(&ui, 1), "                ");
+    }
+
+    #[test]
+    fn hardware_keypad_digits_enter_dial_mode_and_lookup_aliases() {
+        let config = phonebook_config();
+        let mut ui = HardwareUi::new(true);
+        ui.became_available();
+
+        assert_eq!(
+            ui.handle_keypad_event(key_down('1'), CallState::Available, &config),
+            HardwareAction::None
+        );
+        assert_eq!(ui.mode, HardwareMode::Dial);
+        assert_eq!(ui.input, "1");
+        assert_eq!(display_row(&ui, 0), "1               ");
+        assert_eq!(display_row(&ui, 1), "Unknown         ");
+
+        ui.handle_keypad_event(key_down('2'), CallState::Available, &config);
+
+        assert_eq!(ui.input, "12");
+        assert_eq!(display_row(&ui, 0), "12              ");
+        assert_eq!(display_row(&ui, 1), "Mary            ");
+    }
+
+    #[test]
+    fn hardware_dial_mode_supports_backspace_clear_and_cancel() {
+        let config = RnphoneConfig::default();
+        let mut ui = HardwareUi::new(true);
+        ui.handle_keypad_event(key_down('1'), CallState::Available, &config);
+        ui.handle_keypad_event(key_down('2'), CallState::Available, &config);
+        ui.handle_keypad_event(key_down('3'), CallState::Available, &config);
+
+        ui.handle_keypad_event(key_down('B'), CallState::Available, &config);
+        assert_eq!(ui.input, "12");
+        assert_eq!(display_row(&ui, 0), "12              ");
+
+        ui.handle_keypad_event(key_down('C'), CallState::Available, &config);
+        assert_eq!(ui.input, "");
+        assert_eq!(display_row(&ui, 1), "Enter number    ");
+
+        ui.handle_keypad_event(key_down('A'), CallState::Available, &config);
+        assert_eq!(ui.mode, HardwareMode::Idle);
+        assert_eq!(display_row(&ui, 0), "Telephone Ready ");
+        assert_eq!(display_row(&ui, 1), "                ");
+    }
+
+    #[test]
+    fn hardware_dial_key_dials_matching_alias_and_resets_input() {
+        let config = phonebook_config();
+        let expected_hash = parse_hash("f3e8c3359b39d36f3baff0a616a73d3e").unwrap();
+        let mut ui = HardwareUi::new(true);
+        ui.handle_keypad_event(key_down('1'), CallState::Available, &config);
+        ui.handle_keypad_event(key_down('2'), CallState::Available, &config);
+
+        let action = ui.handle_keypad_event(key_down('D'), CallState::Available, &config);
+
+        assert_eq!(action, HardwareAction::Dial(expected_hash));
+        assert_eq!(ui.mode, HardwareMode::Idle);
+        assert_eq!(ui.input, "");
+    }
+
+    #[test]
+    fn hardware_hook_up_dials_matching_alias() {
+        let config = phonebook_config();
+        let expected_hash = parse_hash("f3e8c3359b39d36f3baff0a616a73d3e").unwrap();
+        let mut ui = HardwareUi::new(false);
+        ui.handle_keypad_event(key_down('1'), CallState::Available, &config);
+        ui.handle_keypad_event(key_down('2'), CallState::Available, &config);
+
+        let action = ui.handle_keypad_event(hook_up(), CallState::Available, &config);
+
+        assert_eq!(action, HardwareAction::Dial(expected_hash));
+        assert_eq!(ui.mode, HardwareMode::Idle);
+    }
+
+    #[test]
+    fn hardware_ringing_keys_answer_or_reject_like_upstream() {
+        let config = RnphoneConfig::default();
+        let mut ui = HardwareUi::new(false);
+
+        assert_eq!(
+            ui.handle_keypad_event(key_down('D'), CallState::Ringing, &config),
+            HardwareAction::Answer
+        );
+        assert_eq!(
+            ui.handle_keypad_event(hook_up(), CallState::Ringing, &config),
+            HardwareAction::Answer
+        );
+        assert_eq!(
+            ui.handle_keypad_event(key_down('C'), CallState::Ringing, &config),
+            HardwareAction::Reject
+        );
+    }
+
+    #[test]
+    fn hardware_active_call_keys_hang_up_like_upstream() {
+        let config = RnphoneConfig::default();
+        let mut ui = HardwareUi::new(false);
+
+        for state in [
+            CallState::Calling,
+            CallState::Connecting,
+            CallState::Established,
+        ] {
+            assert_eq!(
+                ui.handle_keypad_event(key_down('D'), state, &config),
+                HardwareAction::Hangup
+            );
+            assert_eq!(
+                ui.handle_keypad_event(hook_down(), state, &config),
+                HardwareAction::Hangup
+            );
+        }
+    }
+
+    #[test]
+    fn hardware_sleeping_display_wakes_and_processes_same_key_event() {
+        let config = RnphoneConfig::default();
+        let mut ui = HardwareUi::new(true);
+        ui.became_available();
+        ui.sleep();
+        assert!(ui.display.as_ref().unwrap().is_sleeping());
+
+        ui.handle_keypad_event(key_down('5'), CallState::Available, &config);
+
+        assert_eq!(ui.mode, HardwareMode::Dial);
+        assert_eq!(ui.input, "5");
+        assert!(!ui.display.as_ref().unwrap().is_sleeping());
+        assert_eq!(display_row(&ui, 0), "5               ");
+        assert_eq!(display_row(&ui, 1), "Unknown         ");
+    }
+
+    #[test]
     fn empty_audio_device_names_are_ignored() {
         let config =
             RnphoneConfig::parse("[telephone]\nspeaker =    \nmicrophone =\nringer =     \n")
@@ -1444,6 +1767,35 @@ mod tests {
 
     fn test_app() -> App {
         test_app_with_config(RnphoneConfig::default())
+    }
+
+    fn phonebook_config() -> RnphoneConfig {
+        RnphoneConfig::parse("[phonebook]\nMary = f3e8c3359b39d36f3baff0a616a73d3e, 12\n").unwrap()
+    }
+
+    fn key_down(key: char) -> KeypadEvent {
+        KeypadEvent {
+            key: Key::Char(key),
+            transition: KeyTransition::Down,
+        }
+    }
+
+    fn hook_down() -> KeypadEvent {
+        KeypadEvent {
+            key: Key::Hook,
+            transition: KeyTransition::Down,
+        }
+    }
+
+    fn hook_up() -> KeypadEvent {
+        KeypadEvent {
+            key: Key::Hook,
+            transition: KeyTransition::Up,
+        }
+    }
+
+    fn display_row(ui: &HardwareUi, row: usize) -> &str {
+        ui.display.as_ref().unwrap().row(row).unwrap()
     }
 
     fn link_id(byte: u8) -> rns_net::LinkId {
