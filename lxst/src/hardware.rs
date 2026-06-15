@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -405,6 +406,179 @@ pub trait Lcd1602Display {
     fn sleep(&mut self);
     fn wake(&mut self);
     fn is_sleeping(&self) -> bool;
+}
+
+pub trait Lcd1602Bus {
+    type Error;
+
+    fn write_byte(&mut self, byte: u8) -> Result<(), Self::Error>;
+}
+
+#[derive(Debug, Clone)]
+pub struct I2cLcd1602<B> {
+    bus: B,
+    backlight: u8,
+    last_error: Option<String>,
+}
+
+#[cfg(feature = "gpio-rpi")]
+pub type RpiI2cLcd1602 = I2cLcd1602<rppal::i2c::I2c>;
+
+impl<B> I2cLcd1602<B> {
+    pub const MODE_CMD: u8 = 0x00;
+    pub const MODE_CHR: u8 = 0x01;
+    pub const ROW_1: u8 = 0x80;
+    pub const ROW_2: u8 = 0xC0;
+    pub const BACKLIGHT_ON: u8 = 0x08;
+    pub const BACKLIGHT_OFF: u8 = 0x00;
+    pub const FLAG_ENABLE: u8 = 0b0000_0100;
+    pub const FLAG_RS: u8 = 0b0000_0001;
+    pub const CMD_INIT1: u8 = 0x33;
+    pub const CMD_INIT2: u8 = 0x32;
+    pub const CMD_CLEAR: u8 = 0x01;
+    pub const T_PULSE: Duration = Duration::from_micros(500);
+
+    pub fn bus(&self) -> &B {
+        &self.bus
+    }
+
+    pub fn bus_mut(&mut self) -> &mut B {
+        &mut self.bus
+    }
+
+    pub fn into_bus(self) -> B {
+        self.bus
+    }
+
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+}
+
+impl<B: Lcd1602Bus> I2cLcd1602<B> {
+    pub fn new(bus: B) -> Result<Self, B::Error> {
+        let mut display = Self {
+            bus,
+            backlight: Self::BACKLIGHT_ON,
+            last_error: None,
+        };
+        display.init_display()?;
+        Ok(display)
+    }
+
+    pub fn try_print(&mut self, value: &str, x: usize, y: usize) -> Result<(), B::Error> {
+        if self.backlight == Self::BACKLIGHT_OFF {
+            self.try_wake()?;
+        }
+
+        let row = y.min(Lcd1602Buffer::ROWS - 1);
+        let col = x.min(Lcd1602Buffer::COLS - 1);
+        self.send_command(0x80 + 0x40 * row as u8 + col as u8)?;
+
+        for ch in value
+            .chars()
+            .chain(std::iter::repeat(' '))
+            .take(Lcd1602Buffer::COLS)
+        {
+            self.send_data(ch as u8)?;
+        }
+        Ok(())
+    }
+
+    pub fn try_clear(&mut self) -> Result<(), B::Error> {
+        self.try_print("", 0, 0)?;
+        self.try_print("", 0, 1)
+    }
+
+    pub fn try_sleep(&mut self) -> Result<(), B::Error> {
+        self.backlight = Self::BACKLIGHT_OFF;
+        self.send_command(Self::CMD_CLEAR)
+    }
+
+    pub fn try_wake(&mut self) -> Result<(), B::Error> {
+        self.backlight = Self::BACKLIGHT_ON;
+        self.init_display()
+    }
+
+    fn init_display(&mut self) -> Result<(), B::Error> {
+        self.send_command(Self::CMD_INIT1)?;
+        self.send_command(Self::CMD_INIT2)?;
+        self.send_command(0x28)?;
+        self.send_command(0x0C)?;
+        self.send_command(Self::CMD_CLEAR)
+    }
+
+    fn send_command(&mut self, command: u8) -> Result<(), B::Error> {
+        self.send_nibbles(command, Self::MODE_CMD)
+    }
+
+    fn send_data(&mut self, data: u8) -> Result<(), B::Error> {
+        self.send_nibbles(data, Self::MODE_CHR)
+    }
+
+    fn send_nibbles(&mut self, value: u8, mode: u8) -> Result<(), B::Error> {
+        self.send_nibble(value & 0xF0, mode)?;
+        self.send_nibble((value & 0x0F) << 4, mode)
+    }
+
+    fn send_nibble(&mut self, nibble: u8, mode: u8) -> Result<(), B::Error> {
+        self.send_byte(nibble | mode | Self::FLAG_ENABLE)?;
+        thread::sleep(Self::T_PULSE);
+        self.send_byte(nibble | mode)
+    }
+
+    fn send_byte(&mut self, byte: u8) -> Result<(), B::Error> {
+        self.bus.write_byte(byte | self.backlight)
+    }
+}
+
+impl<B: Lcd1602Bus> Lcd1602Display for I2cLcd1602<B>
+where
+    B::Error: fmt::Display,
+{
+    fn print(&mut self, value: &str, x: usize, y: usize) {
+        self.last_error = self.try_print(value, x, y).err().map(|err| err.to_string());
+    }
+
+    fn clear(&mut self) {
+        self.last_error = self.try_clear().err().map(|err| err.to_string());
+    }
+
+    fn sleep(&mut self) {
+        self.last_error = self.try_sleep().err().map(|err| err.to_string());
+    }
+
+    fn wake(&mut self) {
+        self.last_error = self.try_wake().err().map(|err| err.to_string());
+    }
+
+    fn is_sleeping(&self) -> bool {
+        self.backlight == Self::BACKLIGHT_OFF
+    }
+}
+
+#[cfg(feature = "gpio-rpi")]
+impl Lcd1602Bus for rppal::i2c::I2c {
+    type Error = rppal::i2c::Error;
+
+    fn write_byte(&mut self, byte: u8) -> Result<(), Self::Error> {
+        match self.write(&[byte])? {
+            1 => Ok(()),
+            written => Err(rppal::i2c::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                format!("short LCD1602 write: {written} bytes"),
+            ))),
+        }
+    }
+}
+
+#[cfg(feature = "gpio-rpi")]
+impl I2cLcd1602<rppal::i2c::I2c> {
+    pub fn rpi(bus: u8, address: u16) -> Result<I2cLcd1602<rppal::i2c::I2c>, rppal::i2c::Error> {
+        let mut i2c = rppal::i2c::I2c::with_bus(bus)?;
+        i2c.set_slave_address(address)?;
+        I2cLcd1602::new(i2c)
+    }
 }
 
 impl Lcd1602Display for Lcd1602Buffer {

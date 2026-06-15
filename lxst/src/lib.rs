@@ -22,12 +22,12 @@ pub use codec::{
     AudioCodec, Codec2Codec, CodecError, CodecFactory, CodecSelection, CodecState, NullCodec,
     OpusCodec, RawCodec,
 };
-#[cfg(feature = "gpio-rpi")]
-pub use hardware::RpiMatrixKeypadBackend;
 pub use hardware::{
-    BufferedLcd1602, Key, KeyTransition, KeypadEvent, Lcd1602Buffer, Lcd1602Display, MatrixKeypad,
-    MatrixKeypadBackend, MatrixKeypadPoller, MatrixKeypadScanner,
+    BufferedLcd1602, I2cLcd1602, Key, KeyTransition, KeypadEvent, Lcd1602Buffer, Lcd1602Bus,
+    Lcd1602Display, MatrixKeypad, MatrixKeypadBackend, MatrixKeypadPoller, MatrixKeypadScanner,
 };
+#[cfg(feature = "gpio-rpi")]
+pub use hardware::{RpiI2cLcd1602, RpiMatrixKeypadBackend};
 pub use media::{
     AudioFrameSink, FilePlayer, FileRecorder, MediaError, OpusFileSink, OpusFileSource,
     QueuedOpusFileSink, QueuedOpusFileSinkConfig, SourcePlayer, SourceRecorder,

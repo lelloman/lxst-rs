@@ -1,6 +1,6 @@
 use lxst::{
-    BufferedLcd1602, Key, KeyTransition, Lcd1602Buffer, Lcd1602Display, MatrixKeypad,
-    MatrixKeypadBackend, MatrixKeypadScanner,
+    BufferedLcd1602, I2cLcd1602, Key, KeyTransition, Lcd1602Buffer, Lcd1602Bus, Lcd1602Display,
+    MatrixKeypad, MatrixKeypadBackend, MatrixKeypadScanner,
 };
 
 #[test]
@@ -195,6 +195,59 @@ fn buffered_lcd1602_exposes_buffered_backend_for_tests_and_platform_adapters() {
     assert!(!display.is_sleeping());
 }
 
+#[test]
+fn i2c_lcd1602_initializes_using_python_driver_sequence() {
+    let display = I2cLcd1602::new(FakeLcdBus::default()).expect("display should initialize");
+
+    assert_eq!(
+        display.bus().writes,
+        vec![
+            0x3c, 0x38, 0x3c, 0x38, 0x3c, 0x38, 0x2c, 0x28, 0x2c, 0x28, 0x8c, 0x88, 0x0c, 0x08,
+            0xcc, 0xc8, 0x0c, 0x08, 0x1c, 0x18,
+        ]
+    );
+}
+
+#[test]
+fn i2c_lcd1602_print_clamps_row_column_and_pads_to_full_row() {
+    let mut display = I2cLcd1602::new(FakeLcdBus::default()).expect("display should initialize");
+    display.bus_mut().writes.clear();
+
+    display
+        .try_print("A", usize::MAX, 1)
+        .expect("print should succeed");
+
+    assert_eq!(display.bus().writes.len(), 4 + Lcd1602Buffer::COLS * 4);
+    assert_eq!(&display.bus().writes[..4], &[0xcc, 0xc8, 0xfc, 0xf8]);
+    assert_eq!(&display.bus().writes[4..8], &[0x4d, 0x49, 0x1d, 0x19]);
+    assert_eq!(&display.bus().writes[8..12], &[0x2d, 0x29, 0x0d, 0x09]);
+}
+
+#[test]
+fn i2c_lcd1602_sleep_and_wake_toggle_backlight_protocol() {
+    let mut display = I2cLcd1602::new(FakeLcdBus::default()).expect("display should initialize");
+    display.bus_mut().writes.clear();
+
+    display.try_sleep().expect("sleep should succeed");
+    assert!(display.is_sleeping());
+    assert_eq!(display.bus().writes, vec![0x04, 0x00, 0x14, 0x10]);
+
+    display.bus_mut().writes.clear();
+    display.try_wake().expect("wake should succeed");
+    assert!(!display.is_sleeping());
+    assert_eq!(&display.bus().writes[..4], &[0x3c, 0x38, 0x3c, 0x38]);
+}
+
+#[test]
+fn i2c_lcd1602_display_trait_records_last_hardware_error() {
+    let mut display = I2cLcd1602::new(FakeLcdBus::default()).expect("display should initialize");
+    display.bus_mut().fail_after = Some(display.bus().writes.len());
+
+    display.print("x", 0, 0);
+
+    assert_eq!(display.last_error(), Some("fake LCD bus error"));
+}
+
 fn drive_ready_display(display: &mut dyn Lcd1602Display) {
     display.clear();
     display.print("Telephone Ready", 0, 0);
@@ -226,5 +279,35 @@ impl MatrixKeypadBackend for FakeKeypadBackend {
 
     fn hook_on(&mut self) -> Option<bool> {
         self.hook_on
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct FakeLcdBus {
+    writes: Vec<u8>,
+    fail_after: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FakeLcdError;
+
+impl std::fmt::Display for FakeLcdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("fake LCD bus error")
+    }
+}
+
+impl std::error::Error for FakeLcdError {}
+
+impl Lcd1602Bus for FakeLcdBus {
+    type Error = FakeLcdError;
+
+    fn write_byte(&mut self, byte: u8) -> Result<(), Self::Error> {
+        if self.fail_after == Some(self.writes.len()) {
+            return Err(FakeLcdError);
+        }
+
+        self.writes.push(byte);
+        Ok(())
     }
 }
