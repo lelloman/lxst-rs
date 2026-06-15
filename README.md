@@ -30,12 +30,16 @@ The workspace contains a tested transport-neutral wire layer, Raw/Opus/Codec2 co
 ## Examples
 
 ```bash
+cargo run -p lxst --example tone_generator
+cargo run -p lxst --example filters
+cargo run -p lxst --example mixer
+cargo run -p lxst --example pipelines
 cargo run -p lxst --example file_player -- path/to/audio.opus
 cargo run -p lxst --example file_player -- path/to/audio.opus --loop
 cargo run -p lxst --example file_recorder -- recording.opus
 ```
 
-The player example exits at EOF unless `--loop` is supplied, in which case Enter stops playback. The recorder example records from the default input device until Enter is pressed.
+The DSP and pipeline examples are deterministic and do not require audio hardware. The player example exits at EOF unless `--loop` is supplied, in which case Enter stops playback. The recorder example records from the default input device until Enter is pressed.
 
 The Python project is early alpha and explicitly API-unstable, so this port
 tracks behavior and wire format deliberately instead of copying incidental
