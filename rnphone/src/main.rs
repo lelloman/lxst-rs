@@ -129,6 +129,7 @@ impl Args {
     }
 }
 
+#[cfg_attr(test, allow(dead_code))]
 struct App {
     config_dir: PathBuf,
     rnsconfig: Option<PathBuf>,
@@ -142,6 +143,20 @@ struct App {
     active_audio: Option<CallAudio>,
     active_ringer: Option<RingerAudio>,
     last_dialed: Option<[u8; 16]>,
+    #[cfg(test)]
+    test_sent_signals: Vec<([u8; 16], Signal)>,
+    #[cfg(test)]
+    test_started_audio: Vec<[u8; 16]>,
+    #[cfg(test)]
+    test_call_audio_running: bool,
+    #[cfg(test)]
+    test_ringer_running: bool,
+    #[cfg(test)]
+    test_ringer_starts: usize,
+    #[cfg(test)]
+    test_ringer_stops: usize,
+    #[cfg(test)]
+    test_call_audio_stops: usize,
 }
 
 impl App {
@@ -189,6 +204,20 @@ impl App {
             active_audio: None,
             active_ringer: None,
             last_dialed: None,
+            #[cfg(test)]
+            test_sent_signals: Vec::new(),
+            #[cfg(test)]
+            test_started_audio: Vec::new(),
+            #[cfg(test)]
+            test_call_audio_running: false,
+            #[cfg(test)]
+            test_ringer_running: false,
+            #[cfg(test)]
+            test_ringer_starts: 0,
+            #[cfg(test)]
+            test_ringer_stops: 0,
+            #[cfg(test)]
+            test_call_audio_stops: 0,
         })
     }
 
@@ -404,13 +433,14 @@ impl App {
                 ..
             } => {
                 if self.telephone.state() == CallState::Available {
+                    self.active_link = Some(link_id.0);
                     if self.telephone.begin_incoming_call(identity_hash.0) {
-                        self.active_link = Some(link_id.0);
                         self.send_signal(Signal::Code(SignalCode::Ringing));
                         self.start_ringer();
                         println!("Incoming call from {identity_hash}");
                     } else {
                         self.send_signal(Signal::Code(SignalCode::Busy));
+                        self.active_link = None;
                         println!("Rejected incoming call from {identity_hash}");
                     }
                 }
@@ -422,14 +452,26 @@ impl App {
                 if let Ok(packet) = LxstPacket::decode(&data) {
                     for signal in packet.signals {
                         self.telephone.apply_signal(signal);
-                        if signal == lxst::Signal::Code(SignalCode::Established) {
-                            if let Some(link_id) = self.active_link {
-                                let _ = self.telephone.establish();
-                                self.start_call_audio(link_id);
+                        match signal {
+                            Signal::Code(SignalCode::Established) => {
+                                if self.telephone.state() == CallState::Established {
+                                    if let Some(link_id) = self.active_link {
+                                        self.start_call_audio(link_id);
+                                    }
+                                }
                             }
-                        }
-                        if self.telephone.state() != CallState::Ringing {
-                            self.stop_ringer();
+                            Signal::Code(SignalCode::Busy | SignalCode::Rejected) => {
+                                if self.telephone.state() == CallState::Available {
+                                    self.stop_ringer();
+                                    self.stop_call_audio();
+                                    self.active_link = None;
+                                }
+                            }
+                            _ => {
+                                if self.telephone.state() != CallState::Ringing {
+                                    self.stop_ringer();
+                                }
+                            }
                         }
                     }
                 }
@@ -437,6 +479,15 @@ impl App {
         }
     }
 
+    #[cfg(test)]
+    fn start_ringer(&mut self) {
+        if !self.test_ringer_running {
+            self.test_ringer_running = true;
+            self.test_ringer_starts += 1;
+        }
+    }
+
+    #[cfg(not(test))]
     fn start_ringer(&mut self) {
         if self.active_ringer.is_some() {
             return;
@@ -453,12 +504,31 @@ impl App {
         }
     }
 
+    #[cfg(test)]
+    fn stop_ringer(&mut self) {
+        if self.test_ringer_running {
+            self.test_ringer_running = false;
+            self.test_ringer_stops += 1;
+        }
+    }
+
+    #[cfg(not(test))]
     fn stop_ringer(&mut self) {
         if let Some(mut ringer) = self.active_ringer.take() {
             ringer.stop();
         }
     }
 
+    #[cfg(test)]
+    fn start_call_audio(&mut self, link_id: [u8; 16]) {
+        self.stop_ringer();
+        if !self.test_call_audio_running {
+            self.test_call_audio_running = true;
+            self.test_started_audio.push(link_id);
+        }
+    }
+
+    #[cfg(not(test))]
     fn start_call_audio(&mut self, link_id: [u8; 16]) {
         self.stop_ringer();
         if self.active_audio.is_some() {
@@ -481,13 +551,31 @@ impl App {
         }
     }
 
+    #[cfg(test)]
+    fn stop_call_audio(&mut self) {
+        if self.test_call_audio_running {
+            self.test_call_audio_running = false;
+            self.test_call_audio_stops += 1;
+        }
+    }
+
+    #[cfg(not(test))]
     fn stop_call_audio(&mut self) {
         if let Some(mut audio) = self.active_audio.take() {
             audio.stop();
         }
     }
 
-    fn send_signal(&self, signal: Signal) {
+    #[cfg(test)]
+    fn send_signal(&mut self, signal: Signal) {
+        let Some(link_id) = self.active_link else {
+            return;
+        };
+        self.test_sent_signals.push((link_id, signal));
+    }
+
+    #[cfg(not(test))]
+    fn send_signal(&mut self, signal: Signal) {
         let (Some(node), Some(link_id)) = (self.node.clone(), self.active_link) else {
             return;
         };
@@ -510,11 +598,13 @@ impl App {
     }
 }
 
+#[cfg_attr(test, allow(dead_code))]
 struct RingerAudio {
     stop_tx: mpsc::Sender<()>,
     worker: Option<JoinHandle<()>>,
 }
 
+#[cfg_attr(test, allow(dead_code))]
 impl RingerAudio {
     fn start(path: PathBuf, preferred_device: Option<String>) -> Result<Self, String> {
         let source = OpusFileSource::open(&path, 60, true).map_err(|e| e.to_string())?;
@@ -558,6 +648,7 @@ struct CallAudio {
     worker: Option<JoinHandle<()>>,
 }
 
+#[cfg_attr(test, allow(dead_code))]
 impl CallAudio {
     fn start(
         node: Arc<RnsNode>,
@@ -666,6 +757,7 @@ where
     Ok(true)
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn run_call_audio_loop(
     mut input: CpalInputSource,
     mut transmit_codec: Box<dyn AudioCodec>,
@@ -1212,6 +1304,274 @@ mod tests {
             .starts_with(b"OggS"));
 
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn test_app_with_config(config: RnphoneConfig) -> App {
+        let identity = Identity::from_private_key(&[0x42; 64]);
+        let telephone_config = TelephoneConfig {
+            allowed_callers: config.allowed_callers.clone(),
+            blocked_callers: config.blocked_callers.clone(),
+            ..TelephoneConfig::default()
+        };
+        let (telephone, _events) = Telephone::new(telephone_config);
+        App {
+            config_dir: temp_config_dir("event-app"),
+            rnsconfig: None,
+            config,
+            identity,
+            telephone,
+            service: false,
+            node: None,
+            network_events: None,
+            active_link: None,
+            active_audio: None,
+            active_ringer: None,
+            last_dialed: None,
+            test_sent_signals: Vec::new(),
+            test_started_audio: Vec::new(),
+            test_call_audio_running: false,
+            test_ringer_running: false,
+            test_ringer_starts: 0,
+            test_ringer_stops: 0,
+            test_call_audio_stops: 0,
+        }
+    }
+
+    fn test_app() -> App {
+        test_app_with_config(RnphoneConfig::default())
+    }
+
+    fn link_id(byte: u8) -> rns_net::LinkId {
+        rns_net::LinkId([byte; 16])
+    }
+
+    fn dest_hash(byte: u8) -> rns_net::DestHash {
+        rns_net::DestHash([byte; 16])
+    }
+
+    fn identity_hash(byte: u8) -> rns_net::IdentityHash {
+        rns_net::IdentityHash([byte; 16])
+    }
+
+    fn public_key(byte: u8) -> [u8; 64] {
+        [byte; 64]
+    }
+
+    fn established_link_event(
+        link_id: rns_net::LinkId,
+        is_initiator: bool,
+    ) -> TelephonyNetworkEvent {
+        TelephonyNetworkEvent::LinkEstablished {
+            link_id,
+            dest_hash: dest_hash(0xD0),
+            rtt: 0.125,
+            is_initiator,
+        }
+    }
+
+    fn remote_identified_event(
+        link_id: rns_net::LinkId,
+        identity_hash: rns_net::IdentityHash,
+    ) -> TelephonyNetworkEvent {
+        TelephonyNetworkEvent::RemoteIdentified {
+            link_id,
+            identity_hash,
+            public_key: public_key(0xA5),
+        }
+    }
+
+    fn link_data_signal(signal: Signal) -> TelephonyNetworkEvent {
+        TelephonyNetworkEvent::LinkData {
+            link_id: link_id(0x77),
+            context: 0,
+            data: LxstPacket::signalling(signal).encode().unwrap(),
+        }
+    }
+
+    #[test]
+    fn incoming_remote_identity_rings_and_tracks_link() {
+        let mut app = test_app();
+        let link_id = link_id(0x11);
+        let caller = identity_hash(0x22);
+
+        app.handle_network_event(remote_identified_event(link_id, caller));
+
+        assert_eq!(app.telephone.state(), CallState::Ringing);
+        assert_eq!(app.active_link, Some(link_id.0));
+        assert_eq!(
+            app.test_sent_signals,
+            vec![(link_id.0, Signal::Code(SignalCode::Ringing))]
+        );
+        assert!(app.test_ringer_running);
+        assert_eq!(app.test_ringer_starts, 1);
+    }
+
+    #[test]
+    fn inbound_link_can_establish_before_remote_identity() {
+        let mut app = test_app();
+        let link_id = link_id(0x33);
+        let caller = identity_hash(0x44);
+
+        app.handle_network_event(established_link_event(link_id, false));
+        assert_eq!(app.active_link, Some(link_id.0));
+        assert_eq!(app.telephone.state(), CallState::Available);
+        assert!(app.test_sent_signals.is_empty());
+
+        app.handle_network_event(remote_identified_event(link_id, caller));
+        assert_eq!(app.active_link, Some(link_id.0));
+        assert_eq!(app.telephone.state(), CallState::Ringing);
+        assert_eq!(
+            app.test_sent_signals,
+            vec![(link_id.0, Signal::Code(SignalCode::Ringing))]
+        );
+    }
+
+    #[test]
+    fn blocked_incoming_identity_sends_busy_on_identified_link() {
+        let blocked = [0x55; 16];
+        let mut config = RnphoneConfig::default();
+        config.blocked_callers.insert(blocked);
+        let mut app = test_app_with_config(config);
+        let link_id = link_id(0x56);
+
+        app.handle_network_event(remote_identified_event(
+            link_id,
+            rns_net::IdentityHash(blocked),
+        ));
+
+        assert_eq!(app.telephone.state(), CallState::Available);
+        assert_eq!(app.active_link, None);
+        assert_eq!(
+            app.test_sent_signals,
+            vec![(link_id.0, Signal::Code(SignalCode::Busy))]
+        );
+        assert_eq!(app.test_ringer_starts, 0);
+    }
+
+    #[test]
+    fn outgoing_link_established_sends_established_and_starts_audio() {
+        let mut app = test_app();
+        let remote = [0x66; 16];
+        let link_id = link_id(0x67);
+        assert!(app.telephone.begin_outgoing_call(remote));
+
+        app.handle_network_event(established_link_event(link_id, true));
+
+        assert_eq!(app.active_link, Some(link_id.0));
+        assert_eq!(app.telephone.state(), CallState::Established);
+        assert_eq!(
+            app.test_sent_signals,
+            vec![(link_id.0, Signal::Code(SignalCode::Established))]
+        );
+        assert_eq!(app.test_started_audio, vec![link_id.0]);
+        assert!(app.test_call_audio_running);
+    }
+
+    #[test]
+    fn incoming_established_signal_before_answer_does_not_start_audio() {
+        let mut app = test_app();
+        let link_id = link_id(0x70);
+        app.handle_network_event(remote_identified_event(link_id, identity_hash(0x71)));
+
+        app.handle_network_event(link_data_signal(Signal::Code(SignalCode::Established)));
+
+        assert_eq!(app.telephone.state(), CallState::Ringing);
+        assert!(app.test_started_audio.is_empty());
+        assert!(app.test_ringer_running);
+    }
+
+    #[test]
+    fn outgoing_established_signal_starts_audio_once_call_is_established() {
+        let mut app = test_app();
+        let remote = [0x72; 16];
+        let link_id = link_id(0x73);
+        assert!(app.telephone.begin_outgoing_call(remote));
+        app.active_link = Some(link_id.0);
+
+        app.handle_network_event(link_data_signal(Signal::Code(SignalCode::Established)));
+        app.handle_network_event(link_data_signal(Signal::Code(SignalCode::Established)));
+
+        assert_eq!(app.telephone.state(), CallState::Established);
+        assert_eq!(app.test_started_audio, vec![link_id.0]);
+        assert!(app.test_call_audio_running);
+    }
+
+    #[test]
+    fn remote_busy_signal_cleans_active_link_and_audio() {
+        let mut app = test_app();
+        let remote = [0x80; 16];
+        let link_id = link_id(0x81);
+        assert!(app.telephone.begin_outgoing_call(remote));
+        app.active_link = Some(link_id.0);
+        app.test_call_audio_running = true;
+
+        app.handle_network_event(link_data_signal(Signal::Code(SignalCode::Busy)));
+
+        assert_eq!(app.telephone.state(), CallState::Available);
+        assert_eq!(app.active_link, None);
+        assert!(!app.test_call_audio_running);
+        assert_eq!(app.test_call_audio_stops, 1);
+    }
+
+    #[test]
+    fn remote_rejected_signal_cleans_active_link_and_ringer() {
+        let mut app = test_app();
+        let remote = [0x82; 16];
+        let link_id = link_id(0x83);
+        assert!(app.telephone.begin_outgoing_call(remote));
+        app.active_link = Some(link_id.0);
+        app.test_ringer_running = true;
+
+        app.handle_network_event(link_data_signal(Signal::Code(SignalCode::Rejected)));
+
+        assert_eq!(app.telephone.state(), CallState::Available);
+        assert_eq!(app.active_link, None);
+        assert!(!app.test_ringer_running);
+        assert_eq!(app.test_ringer_stops, 1);
+    }
+
+    #[test]
+    fn closed_non_active_link_does_not_touch_current_call() {
+        let mut app = test_app();
+        let active = link_id(0x90);
+        app.active_link = Some(active.0);
+        assert!(app.telephone.begin_outgoing_call([0x91; 16]));
+        app.test_call_audio_running = true;
+        app.test_ringer_running = true;
+
+        app.handle_network_event(TelephonyNetworkEvent::LinkClosed {
+            link_id: link_id(0x92),
+            reason: None,
+        });
+
+        assert_eq!(app.active_link, Some(active.0));
+        assert_eq!(app.telephone.state(), CallState::Calling);
+        assert!(app.test_call_audio_running);
+        assert!(app.test_ringer_running);
+        assert_eq!(app.test_call_audio_stops, 0);
+        assert_eq!(app.test_ringer_stops, 0);
+    }
+
+    #[test]
+    fn closed_active_link_cleans_call_state_and_side_effects() {
+        let mut app = test_app();
+        let active = link_id(0x94);
+        app.active_link = Some(active.0);
+        assert!(app.telephone.begin_outgoing_call([0x95; 16]));
+        app.test_call_audio_running = true;
+        app.test_ringer_running = true;
+
+        app.handle_network_event(TelephonyNetworkEvent::LinkClosed {
+            link_id: active,
+            reason: None,
+        });
+
+        assert_eq!(app.active_link, None);
+        assert_eq!(app.telephone.state(), CallState::Available);
+        assert!(!app.test_call_audio_running);
+        assert!(!app.test_ringer_running);
+        assert_eq!(app.test_call_audio_stops, 1);
+        assert_eq!(app.test_ringer_stops, 1);
     }
 
     #[test]
