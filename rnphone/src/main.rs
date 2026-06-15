@@ -1508,21 +1508,21 @@ fn pretty_hash(bytes: &[u8]) -> String {
 
 fn identity_status(identity_hash: &[u8]) -> String {
     format!(
-        "Identity hash of this telephone: {}\n",
+        "Identity hash of this telephone: {}\n\n",
         pretty_hash(identity_hash)
     )
 }
 
 fn destination_status(destination_hash: &[u8]) -> String {
     format!(
-        "Destination hash of this telephone: {}\n",
+        "Destination hash of this telephone: {}\n\n",
         pretty_hash(destination_hash)
     )
 }
 
 fn phonebook_menu(config: &RnphoneConfig) -> String {
     if config.phonebook_order.is_empty() {
-        return "\nNo entries in phonebook\n".to_string();
+        return "\nNo entries in phonebook\n\n".to_string();
     }
 
     let max_name_len = config
@@ -1555,6 +1555,10 @@ fn phonebook_menu(config: &RnphoneConfig) -> String {
             pretty_hash(&entry.identity_hash)
         ));
     }
+    output.push_str(&format!(
+        "  back{}: Back to main menu\n\n",
+        " ".repeat((max_name_len + alias_width).saturating_sub(2))
+    ));
     output
 }
 
@@ -1585,14 +1589,24 @@ fn print_help() {
 }
 
 fn print_help_menu() {
-    println!("Available commands");
-    println!("  phonebook : Open the phonebook");
-    println!("  redial    : Call the last called identity again");
-    println!("  identity  : Display the identity hash");
-    println!("  desthash  : Display the destination hash");
-    println!("  announce  : Send an announce");
-    println!("  quit      : Exit the program");
-    println!("  help      : This help menu");
+    print!("{}", help_menu());
+}
+
+fn help_menu() -> String {
+    [
+        "",
+        "Available commands",
+        "  phonebook : Open the phonebook",
+        "  redial    : Call the last called identity again",
+        "  identity  : Display the identity hash of this telephone",
+        "  desthash  : Display the destination hash of this telephone",
+        "  announce  : Send an announce from this telephone",
+        "  quit      : Exit the program",
+        "  help      : This help menu",
+        "",
+        "",
+    ]
+    .join("\n")
 }
 
 fn systemd_unit() -> String {
@@ -1993,11 +2007,11 @@ mod tests {
 
         assert_eq!(
             identity_status(&hash),
-            "Identity hash of this telephone: <f3e8c3359b39d36f3baff0a616a73d3e>\n"
+            "Identity hash of this telephone: <f3e8c3359b39d36f3baff0a616a73d3e>\n\n"
         );
         assert_eq!(
             destination_status(&hash),
-            "Destination hash of this telephone: <f3e8c3359b39d36f3baff0a616a73d3e>\n"
+            "Destination hash of this telephone: <f3e8c3359b39d36f3baff0a616a73d3e>\n\n"
         );
     }
 
@@ -2005,7 +2019,7 @@ mod tests {
     fn formats_empty_phonebook_like_upstream() {
         let config = RnphoneConfig::default();
 
-        assert_eq!(phonebook_menu(&config), "\nNo entries in phonebook\n");
+        assert_eq!(phonebook_menu(&config), "\nNo entries in phonebook\n\n");
     }
 
     #[test]
@@ -2017,7 +2031,7 @@ mod tests {
 
         assert_eq!(
             phonebook_menu(&config),
-            "\nPhonebook\n  12 Mary      : <f3e8c3359b39d36f3baff0a616a73d3e>\n   2 Alexander : <5d2d14619dfa0ff06278c17347c14331>\n"
+            "\nPhonebook\n  12 Mary      : <f3e8c3359b39d36f3baff0a616a73d3e>\n   2 Alexander : <5d2d14619dfa0ff06278c17347c14331>\n  back         : Back to main menu\n\n"
         );
     }
 
@@ -2034,7 +2048,15 @@ mod tests {
         assert_eq!(config.phonebook_order, vec!["Rudy"]);
         assert_eq!(
             phonebook_menu(&config),
-            "\nPhonebook\n  241 Rudy : <5d2d14619dfa0ff06278c17347c14331>\n"
+            "\nPhonebook\n  241 Rudy : <5d2d14619dfa0ff06278c17347c14331>\n  back     : Back to main menu\n\n"
+        );
+    }
+
+    #[test]
+    fn formats_help_menu_like_upstream() {
+        assert_eq!(
+            help_menu(),
+            "\nAvailable commands\n  phonebook : Open the phonebook\n  redial    : Call the last called identity again\n  identity  : Display the identity hash of this telephone\n  desthash  : Display the destination hash of this telephone\n  announce  : Send an announce from this telephone\n  quit      : Exit the program\n  help      : This help menu\n\n"
         );
     }
 
