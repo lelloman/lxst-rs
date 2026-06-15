@@ -14,8 +14,9 @@ use lxst::network::{
 use lxst::{
     Agc, AudioCodec, AudioSink, AudioSource, BandPass, CallProfile, CallState, CodecFactory,
     CodecSelection, CpalInputConfig, CpalInputSource, CpalOutputConfig, CpalOutputSink,
-    EncodedAudioFrame, Key, KeyTransition, KeypadEvent, Lcd1602Buffer, LxstPacket, OpusFileSource,
-    Signal, SignalCode, SourcePlayer, Telephone, TelephoneConfig, TelephonyNetworkEvent,
+    EncodedAudioFrame, Key, KeyTransition, KeypadEvent, Lcd1602Buffer, LxstPacket, MatrixKeypad,
+    OpusFileSource, Signal, SignalCode, SourcePlayer, Telephone, TelephoneConfig,
+    TelephonyNetworkEvent,
 };
 use rns_crypto::identity::Identity;
 use rns_crypto::OsRng;
@@ -142,6 +143,7 @@ struct App {
     active_audio: Option<CallAudio>,
     active_ringer: Option<RingerAudio>,
     last_dialed: Option<[u8; 16]>,
+    hardware_ui: HardwareUi,
     #[cfg(test)]
     test_sent_signals: Vec<([u8; 16], Signal)>,
     #[cfg(test)]
@@ -182,6 +184,7 @@ impl App {
         };
         config.resolve_paths(&config_dir);
         config.finalize_for_identity(identity.hash());
+        let hardware_ui = HardwareUi::from_config(&config.hardware)?;
 
         let telephone_config = TelephoneConfig {
             allowed_callers: config.allowed_callers.clone(),
@@ -202,6 +205,7 @@ impl App {
             active_audio: None,
             active_ringer: None,
             last_dialed: None,
+            hardware_ui,
             #[cfg(test)]
             test_sent_signals: Vec::new(),
             #[cfg(test)]
@@ -267,13 +271,7 @@ impl App {
                     None => println!("No last call to redial"),
                 },
                 "answer" => {
-                    if self.telephone.answer() {
-                        self.send_signal(Signal::Code(SignalCode::Connecting));
-                        let _ = self.telephone.establish();
-                        self.send_signal(Signal::Code(SignalCode::Established));
-                        if let Some(link_id) = self.active_link {
-                            self.start_call_audio(link_id);
-                        }
+                    if self.answer_current() {
                         println!("Call answered");
                     } else {
                         println!("No incoming call to answer");
@@ -296,6 +294,42 @@ impl App {
             self.telephone.tick();
         }
         Ok(())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn handle_hardware_keypad_event(
+        &mut self,
+        endpoint: &TelephonyEndpoint,
+        event: KeypadEvent,
+    ) -> Result<(), String> {
+        let action =
+            self.hardware_ui
+                .handle_keypad_event(event, self.telephone.state(), &self.config);
+        self.apply_hardware_action(endpoint, action)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn apply_hardware_action(
+        &mut self,
+        endpoint: &TelephonyEndpoint,
+        action: HardwareAction,
+    ) -> Result<(), String> {
+        match action {
+            HardwareAction::None => Ok(()),
+            HardwareAction::Answer => {
+                if self.answer_current() {
+                    println!("Call answered");
+                } else {
+                    println!("No incoming call to answer");
+                }
+                Ok(())
+            }
+            HardwareAction::Reject | HardwareAction::Hangup => {
+                self.hangup_current();
+                Ok(())
+            }
+            HardwareAction::Dial(identity_hash) => self.dial_hash(endpoint, identity_hash),
+        }
     }
 
     fn ensure_network(&mut self, endpoint: &TelephonyEndpoint) -> Result<(), String> {
@@ -367,6 +401,20 @@ impl App {
             println!("Telephone is busy");
         }
         Ok(())
+    }
+
+    fn answer_current(&mut self) -> bool {
+        if !self.telephone.answer() {
+            return false;
+        }
+
+        self.send_signal(Signal::Code(SignalCode::Connecting));
+        let _ = self.telephone.establish();
+        self.send_signal(Signal::Code(SignalCode::Established));
+        if let Some(link_id) = self.active_link {
+            self.start_call_audio(link_id);
+        }
+        true
     }
 
     fn hangup_current(&mut self) {
@@ -807,6 +855,39 @@ struct HardwareConfig {
     amp_mute_level: Option<PinLevel>,
 }
 
+impl HardwareConfig {
+    fn validate(&self) -> Result<(), String> {
+        self.keypad_matrix()?;
+        self.display_enabled()?;
+        Ok(())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn keypad_matrix(&self) -> Result<Option<MatrixKeypad>, String> {
+        let Some(driver) = self.keypad.as_deref() else {
+            return Ok(None);
+        };
+
+        let mut keypad = match driver {
+            "gpio_4x4" => MatrixKeypad::gpio_4x4(),
+            "gpio_5x5" => MatrixKeypad::gpio_5x5(),
+            _ => return Err(format!("unknown keypad driver {driver}")),
+        };
+        if self.keypad_hook_pin.is_some() {
+            keypad = keypad.with_hook();
+        }
+        Ok(Some(keypad))
+    }
+
+    fn display_enabled(&self) -> Result<bool, String> {
+        match self.display.as_deref() {
+            None => Ok(false),
+            Some("i2c_lcd1602") => Ok(true),
+            Some(driver) => Err(format!("unknown display driver {driver}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PinLevel {
     Low,
@@ -1020,6 +1101,11 @@ impl HardwareUi {
             input: String::new(),
             display: display_enabled.then(Lcd1602Buffer::new),
         }
+    }
+
+    fn from_config(config: &HardwareConfig) -> Result<Self, String> {
+        config.validate()?;
+        Ok(Self::new(config.display_enabled()?))
     }
 
     fn became_available(&mut self) {
@@ -1429,6 +1515,34 @@ mod tests {
     }
 
     #[test]
+    fn hardware_config_builds_supported_keypad_and_display_drivers() {
+        let config = RnphoneConfig::parse(
+            "[hardware]\nkeypad = gpio_5x5\ndisplay = i2c_lcd1602\nkeypad_hook_pin = 11\n",
+        )
+        .unwrap();
+
+        let keypad = config.hardware.keypad_matrix().unwrap().unwrap();
+        assert_eq!(keypad.rows(), 5);
+        assert_eq!(keypad.cols(), 5);
+        assert_eq!(keypad.key_at(4, 4), Some(Key::Char('K')));
+        assert!(keypad.is_up(Key::Hook));
+
+        let ui = HardwareUi::from_config(&config.hardware).unwrap();
+        assert!(ui.display.is_some());
+    }
+
+    #[test]
+    fn hardware_config_rejects_unknown_drivers() {
+        let config = RnphoneConfig::parse("[hardware]\nkeypad = spi_keypad\n").unwrap();
+        let err = config.hardware.validate().unwrap_err();
+        assert_eq!(err, "unknown keypad driver spi_keypad");
+
+        let config = RnphoneConfig::parse("[hardware]\ndisplay = oled12864\n").unwrap();
+        let err = HardwareUi::from_config(&config.hardware).unwrap_err();
+        assert_eq!(err, "unknown display driver oled12864");
+    }
+
+    #[test]
     fn rejects_invalid_hardware_pin_level() {
         let err = RnphoneConfig::parse("[hardware]\namp_mute_level = floating\n").unwrap_err();
         assert!(err.contains("invalid pin level"));
@@ -1743,6 +1857,7 @@ mod tests {
             ..TelephoneConfig::default()
         };
         let (telephone, _events) = Telephone::new(telephone_config);
+        let hardware_ui = HardwareUi::from_config(&config.hardware).unwrap();
         App {
             rnsconfig: None,
             config,
@@ -1755,6 +1870,7 @@ mod tests {
             active_audio: None,
             active_ringer: None,
             last_dialed: None,
+            hardware_ui,
             test_sent_signals: Vec::new(),
             test_started_audio: Vec::new(),
             test_call_audio_running: false,
@@ -1843,6 +1959,68 @@ mod tests {
             context: 0,
             data: LxstPacket::signalling(signal).encode().unwrap(),
         }
+    }
+
+    #[test]
+    fn hardware_keypad_answer_routes_through_app_call_flow() {
+        let mut app = test_app();
+        let endpoint = TelephonyEndpoint::new(&app.identity);
+        let link_id = link_id(0x20);
+        app.active_link = Some(link_id.0);
+        assert!(app.telephone.begin_incoming_call([0x21; 16]));
+
+        app.handle_hardware_keypad_event(&endpoint, key_down('D'))
+            .unwrap();
+
+        assert_eq!(app.telephone.state(), CallState::Established);
+        assert_eq!(
+            app.test_sent_signals,
+            vec![
+                (link_id.0, Signal::Code(SignalCode::Connecting)),
+                (link_id.0, Signal::Code(SignalCode::Established)),
+            ]
+        );
+        assert_eq!(app.test_started_audio, vec![link_id.0]);
+        assert!(app.test_call_audio_running);
+    }
+
+    #[test]
+    fn hardware_keypad_reject_routes_through_app_teardown() {
+        let mut app = test_app();
+        let endpoint = TelephonyEndpoint::new(&app.identity);
+        let link_id = link_id(0x22);
+        app.active_link = Some(link_id.0);
+        assert!(app.telephone.begin_incoming_call([0x23; 16]));
+
+        app.handle_hardware_keypad_event(&endpoint, key_down('C'))
+            .unwrap();
+
+        assert_eq!(app.telephone.state(), CallState::Available);
+        assert_eq!(app.active_link, None);
+        assert_eq!(
+            app.test_sent_signals,
+            vec![(link_id.0, Signal::Code(SignalCode::Rejected))]
+        );
+    }
+
+    #[test]
+    fn hardware_hook_down_hangs_up_active_call() {
+        let mut app = test_app();
+        let endpoint = TelephonyEndpoint::new(&app.identity);
+        let link_id = link_id(0x24);
+        app.active_link = Some(link_id.0);
+        assert!(app.telephone.begin_outgoing_call([0x25; 16]));
+        assert!(app.telephone.establish());
+        app.test_call_audio_running = true;
+
+        app.handle_hardware_keypad_event(&endpoint, hook_down())
+            .unwrap();
+
+        assert_eq!(app.telephone.state(), CallState::Available);
+        assert_eq!(app.active_link, None);
+        assert!(!app.test_call_audio_running);
+        assert_eq!(app.test_call_audio_stops, 1);
+        assert!(app.test_sent_signals.is_empty());
     }
 
     #[test]
