@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lxst::network::{
     create_telephony_link, recall_telephony_identity, request_path_until, telephony_dest_hash,
@@ -146,6 +146,7 @@ struct App {
     active_ringer: Option<RingerAudio>,
     last_dialed: Option<[u8; 16]>,
     hardware_ui: HardwareUi,
+    hardware_last_event: Instant,
     #[cfg(test)]
     test_sent_signals: Vec<([u8; 16], Signal)>,
     #[cfg(test)]
@@ -187,6 +188,7 @@ impl App {
         config.resolve_paths(&config_dir);
         config.finalize_for_identity(identity.hash());
         let hardware_ui = HardwareUi::from_config(&config.hardware)?;
+        let hardware_last_event = Instant::now();
 
         let telephone_config = TelephoneConfig {
             allowed_callers: config.allowed_callers.clone(),
@@ -208,6 +210,7 @@ impl App {
             active_ringer: None,
             last_dialed: None,
             hardware_ui,
+            hardware_last_event,
             #[cfg(test)]
             test_sent_signals: Vec::new(),
             #[cfg(test)]
@@ -236,6 +239,7 @@ impl App {
             self.became_available();
             loop {
                 self.poll_network_events();
+                self.poll_hardware_idle(Instant::now());
                 self.telephone.tick();
                 thread::sleep(Duration::from_millis(100));
             }
@@ -261,6 +265,7 @@ impl App {
                 continue;
             }
             self.poll_network_events();
+            self.poll_hardware_idle(Instant::now());
             match line {
                 "?" | "h" | "help" => print_help_menu(),
                 "q" | "quit" | "exit" => break,
@@ -306,6 +311,17 @@ impl App {
         endpoint: &TelephonyEndpoint,
         event: KeypadEvent,
     ) -> Result<(), String> {
+        self.handle_hardware_keypad_event_at(endpoint, event, Instant::now())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn handle_hardware_keypad_event_at(
+        &mut self,
+        endpoint: &TelephonyEndpoint,
+        event: KeypadEvent,
+        now: Instant,
+    ) -> Result<(), String> {
+        self.hardware_last_event = now;
         let action =
             self.hardware_ui
                 .handle_keypad_event(event, self.telephone.state(), &self.config);
@@ -422,7 +438,19 @@ impl App {
     }
 
     fn became_available(&mut self) {
+        self.became_available_at(Instant::now());
+    }
+
+    fn became_available_at(&mut self, now: Instant) {
+        self.hardware_last_event = now;
         self.hardware_ui.became_available();
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn poll_hardware_idle(&mut self, now: Instant) -> bool {
+        let idle_for = now.saturating_duration_since(self.hardware_last_event);
+        self.hardware_ui
+            .sleep_if_idle(idle_for, self.telephone.state(), self.telephone.is_busy())
     }
 
     fn hangup_current(&mut self) {
@@ -1927,6 +1955,7 @@ mod tests {
         };
         let (telephone, _events) = Telephone::new(telephone_config);
         let hardware_ui = HardwareUi::from_config(&config.hardware).unwrap();
+        let hardware_last_event = Instant::now();
         App {
             rnsconfig: None,
             config,
@@ -1940,6 +1969,7 @@ mod tests {
             active_ringer: None,
             last_dialed: None,
             hardware_ui,
+            hardware_last_event,
             test_sent_signals: Vec::new(),
             test_started_audio: Vec::new(),
             test_call_audio_running: false,
@@ -2113,6 +2143,35 @@ mod tests {
         assert_eq!(app.telephone.state(), CallState::Available);
         assert_eq!(display_row(&app.hardware_ui, 0), "Telephone Ready ");
         assert_eq!(display_row(&app.hardware_ui, 1), "                ");
+    }
+
+    #[test]
+    fn app_hardware_idle_poll_sleeps_display_after_last_event_timeout() {
+        let mut app = test_app_with_config(display_config());
+        let start = Instant::now();
+        app.became_available_at(start);
+
+        assert!(!app.poll_hardware_idle(start + HW_SLEEP_TIMEOUT - Duration::from_millis(1)));
+        assert_eq!(app.hardware_ui.mode, HardwareMode::Idle);
+
+        assert!(app.poll_hardware_idle(start + HW_SLEEP_TIMEOUT));
+        assert_eq!(app.hardware_ui.mode, HardwareMode::Sleep);
+        assert!(app.hardware_ui.display.as_ref().unwrap().is_sleeping());
+    }
+
+    #[test]
+    fn app_hardware_keypad_event_resets_idle_sleep_timer() {
+        let mut app = test_app_with_config(display_config());
+        let endpoint = TelephonyEndpoint::new(&app.identity);
+        let start = Instant::now();
+        app.became_available_at(start);
+
+        app.handle_hardware_keypad_event_at(&endpoint, hook_down(), start + Duration::from_secs(8))
+            .unwrap();
+
+        assert_eq!(app.hardware_ui.mode, HardwareMode::Idle);
+        assert!(!app.hardware_ui.display.as_ref().unwrap().is_sleeping());
+        assert!(!app.poll_hardware_idle(start + Duration::from_secs(20)));
     }
 
     #[test]
