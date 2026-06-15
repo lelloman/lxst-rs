@@ -25,13 +25,17 @@ The upstream Python baseline is recorded in [UPSTREAM.md](./UPSTREAM.md).
 
 ## Current Status
 
-The workspace now contains a tested transport-neutral wire layer, Raw codec support, deterministic audio/DSP primitives, Reticulum link helper APIs, an event-driven telephony state API, and an `rnphone` terminal utility scaffold. It is not yet a complete live voice client. The remaining major gaps are:
+The workspace contains a tested transport-neutral wire layer, Raw/Opus/Codec2 codec support, deterministic audio/DSP primitives, CPAL audio I/O, Ogg Opus file media, Reticulum link helper APIs, an event-driven telephony API, and an `rnphone` terminal utility with live call/audio/signalling wiring. Remaining parity work is focused on deeper platform validation, longer live-network interoperability runs against Python LXST, final terminal polish, and examples/docs coverage.
 
-- libopus-backed Opus encode/decode
-- libcodec2 FFI for 700C/1600/3200 telephony profiles
-- CPAL-backed Linux live audio input/output
-- full Reticulum callback orchestration for live call setup and frame exchange
-- Docker/live-network interoperability tests against Python LXST
+## Examples
+
+```bash
+cargo run -p lxst --example file_player -- path/to/audio.opus
+cargo run -p lxst --example file_player -- path/to/audio.opus --loop
+cargo run -p lxst --example file_recorder -- recording.opus
+```
+
+The player example exits at EOF unless `--loop` is supplied, in which case Enter stops playback. The recorder example records from the default input device until Enter is pressed.
 
 The Python project is early alpha and explicitly API-unstable, so this port
 tracks behavior and wire format deliberately instead of copying incidental
