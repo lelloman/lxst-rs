@@ -11,12 +11,16 @@ use lxst::network::{
     create_telephony_link, recall_telephony_identity, request_path_until, telephony_dest_hash,
     LinkSource, LxstLinkSender, Packetizer, TelephonyEndpoint,
 };
+#[cfg(not(feature = "gpio-rpi"))]
+use lxst::MatrixKeypadBackend;
+#[cfg(feature = "gpio-rpi")]
+use lxst::RpiMatrixKeypadBackend;
 use lxst::{
     Agc, AudioCodec, AudioSink, AudioSource, BandPass, CallProfile, CallState, CodecFactory,
     CodecSelection, CpalInputConfig, CpalInputSource, CpalOutputConfig, CpalOutputSink,
     EncodedAudioFrame, Key, KeyTransition, KeypadEvent, Lcd1602Buffer, LxstPacket, MatrixKeypad,
-    MatrixKeypadBackend, MatrixKeypadPoller, MatrixKeypadScanner, OpusFileSource, Signal,
-    SignalCode, SourcePlayer, Telephone, TelephoneConfig, TelephonyNetworkEvent,
+    MatrixKeypadPoller, MatrixKeypadScanner, OpusFileSource, Signal, SignalCode, SourcePlayer,
+    Telephone, TelephoneConfig, TelephonyNetworkEvent,
 };
 use rns_crypto::identity::Identity;
 use rns_crypto::OsRng;
@@ -951,6 +955,25 @@ impl HardwareConfig {
         Ok(Some(keypad))
     }
 
+    #[cfg(feature = "gpio-rpi")]
+    fn keypad_pins(&self) -> Result<Option<(&'static [u8], &'static [u8])>, String> {
+        let Some(driver) = self.keypad.as_deref() else {
+            return Ok(None);
+        };
+
+        match driver {
+            "gpio_4x4" => Ok(Some((
+                &MatrixKeypad::GPIO_4X4_ROW_PINS,
+                &MatrixKeypad::GPIO_4X4_COL_PINS,
+            ))),
+            "gpio_5x5" => Ok(Some((
+                &MatrixKeypad::GPIO_5X5_ROW_PINS,
+                &MatrixKeypad::GPIO_5X5_COL_PINS,
+            ))),
+            _ => Err(format!("unknown keypad driver {driver}")),
+        }
+    }
+
     fn display_enabled(&self) -> Result<bool, String> {
         match self.display.as_deref() {
             None => Ok(false),
@@ -974,27 +997,51 @@ fn start_hardware_keypad(
     };
 
     let (tx, rx) = mpsc::channel();
-    let scanner = MatrixKeypadScanner::new(
-        keypad,
-        NoopKeypadBackend {
-            hook_enabled: config.keypad_hook_pin.is_some(),
-        },
-    );
-    let poller = MatrixKeypadPoller::start(
-        scanner,
-        Duration::from_millis(MatrixKeypad::SCAN_INTERVAL_MS),
-        move |event| {
-            let _ = tx.send(event);
-        },
-    );
-    Ok((Some(rx), Some(poller)))
+
+    #[cfg(feature = "gpio-rpi")]
+    {
+        let Some((row_pins, col_pins)) = config.keypad_pins()? else {
+            return Ok((None, None));
+        };
+        let backend = RpiMatrixKeypadBackend::new(row_pins, col_pins, config.keypad_hook_pin)
+            .map_err(|e| format!("gpio keypad unavailable: {e}"))?;
+        let scanner = MatrixKeypadScanner::new(keypad, backend);
+        let poller = MatrixKeypadPoller::start(
+            scanner,
+            Duration::from_millis(MatrixKeypad::SCAN_INTERVAL_MS),
+            move |event| {
+                let _ = tx.send(event);
+            },
+        );
+        return Ok((Some(rx), Some(poller)));
+    }
+
+    #[cfg(not(feature = "gpio-rpi"))]
+    {
+        let scanner = MatrixKeypadScanner::new(
+            keypad,
+            NoopKeypadBackend {
+                hook_enabled: config.keypad_hook_pin.is_some(),
+            },
+        );
+        let poller = MatrixKeypadPoller::start(
+            scanner,
+            Duration::from_millis(MatrixKeypad::SCAN_INTERVAL_MS),
+            move |event| {
+                let _ = tx.send(event);
+            },
+        );
+        Ok((Some(rx), Some(poller)))
+    }
 }
 
+#[cfg(not(feature = "gpio-rpi"))]
 #[derive(Debug, Clone, Copy)]
 struct NoopKeypadBackend {
     hook_enabled: bool,
 }
 
+#[cfg(not(feature = "gpio-rpi"))]
 impl MatrixKeypadBackend for NoopKeypadBackend {
     fn read_col(&mut self, _row: usize, _col: usize) -> bool {
         false
@@ -2270,6 +2317,7 @@ mod tests {
         assert_eq!(display_row(&app.hardware_ui, 0), "7               ");
     }
 
+    #[cfg(not(feature = "gpio-rpi"))]
     #[test]
     fn configured_keypad_starts_host_noop_event_channel() {
         let config =

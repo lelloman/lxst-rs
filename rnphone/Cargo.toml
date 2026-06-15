@@ -10,3 +10,7 @@ authors.workspace = true
 lxst.workspace = true
 rns-crypto.workspace = true
 rns-net.workspace = true
+
+[features]
+default = []
+gpio-rpi = ["lxst/gpio-rpi"]

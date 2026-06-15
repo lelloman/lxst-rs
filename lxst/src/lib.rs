@@ -22,6 +22,8 @@ pub use codec::{
     AudioCodec, Codec2Codec, CodecError, CodecFactory, CodecSelection, CodecState, NullCodec,
     OpusCodec, RawCodec,
 };
+#[cfg(feature = "gpio-rpi")]
+pub use hardware::RpiMatrixKeypadBackend;
 pub use hardware::{
     BufferedLcd1602, Key, KeyTransition, KeypadEvent, Lcd1602Buffer, Lcd1602Display, MatrixKeypad,
     MatrixKeypadBackend, MatrixKeypadPoller, MatrixKeypadScanner,

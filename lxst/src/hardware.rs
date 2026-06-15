@@ -190,6 +190,57 @@ pub trait MatrixKeypadBackend {
     }
 }
 
+#[cfg(feature = "gpio-rpi")]
+pub struct RpiMatrixKeypadBackend {
+    rows: Vec<rppal::gpio::OutputPin>,
+    cols: Vec<rppal::gpio::InputPin>,
+    hook: Option<rppal::gpio::InputPin>,
+}
+
+#[cfg(feature = "gpio-rpi")]
+impl RpiMatrixKeypadBackend {
+    pub fn new(
+        row_pins: &[u8],
+        col_pins: &[u8],
+        hook_pin: Option<u8>,
+    ) -> Result<Self, rppal::gpio::Error> {
+        let gpio = rppal::gpio::Gpio::new()?;
+        let mut rows = Vec::with_capacity(row_pins.len());
+        for pin in row_pins {
+            rows.push(gpio.get(*pin)?.into_output_low());
+        }
+
+        let mut cols = Vec::with_capacity(col_pins.len());
+        for pin in col_pins {
+            cols.push(gpio.get(*pin)?.into_input_pulldown());
+        }
+
+        let hook = hook_pin
+            .map(|pin| gpio.get(pin).map(|pin| pin.into_input_pullup()))
+            .transpose()?;
+
+        Ok(Self { rows, cols, hook })
+    }
+}
+
+#[cfg(feature = "gpio-rpi")]
+impl MatrixKeypadBackend for RpiMatrixKeypadBackend {
+    fn read_col(&mut self, row: usize, col: usize) -> bool {
+        let (Some(row_pin), Some(col_pin)) = (self.rows.get_mut(row), self.cols.get(col)) else {
+            return false;
+        };
+
+        row_pin.set_high();
+        let active = col_pin.is_high();
+        row_pin.set_low();
+        active
+    }
+
+    fn hook_on(&mut self) -> Option<bool> {
+        self.hook.as_ref().map(rppal::gpio::InputPin::is_low)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MatrixKeypadScanner<B> {
     keypad: MatrixKeypad,

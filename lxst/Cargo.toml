@@ -16,4 +16,9 @@ opus.workspace = true
 rns-core.workspace = true
 rns-crypto.workspace = true
 rns-net.workspace = true
+rppal = { workspace = true, optional = true }
 thiserror.workspace = true
+
+[features]
+default = []
+gpio-rpi = ["dep:rppal"]
