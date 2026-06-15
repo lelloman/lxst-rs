@@ -24,6 +24,7 @@ pub use codec::{
 };
 pub use hardware::{
     BufferedLcd1602, Key, KeyTransition, KeypadEvent, Lcd1602Buffer, Lcd1602Display, MatrixKeypad,
+    MatrixKeypadBackend, MatrixKeypadPoller, MatrixKeypadScanner,
 };
 pub use media::{
     AudioFrameSink, FilePlayer, FileRecorder, MediaError, OpusFileSink, OpusFileSource,

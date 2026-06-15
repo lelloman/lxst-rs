@@ -1,4 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Key {
@@ -177,6 +180,106 @@ impl MatrixKeypad {
         }
         events
     }
+}
+
+pub trait MatrixKeypadBackend {
+    fn read_col(&mut self, row: usize, col: usize) -> bool;
+
+    fn hook_on(&mut self) -> Option<bool> {
+        None
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MatrixKeypadScanner<B> {
+    keypad: MatrixKeypad,
+    backend: B,
+}
+
+impl<B> MatrixKeypadScanner<B> {
+    pub fn new(keypad: MatrixKeypad, backend: B) -> Self {
+        Self { keypad, backend }
+    }
+
+    pub fn keypad(&self) -> &MatrixKeypad {
+        &self.keypad
+    }
+
+    pub fn keypad_mut(&mut self) -> &mut MatrixKeypad {
+        &mut self.keypad
+    }
+
+    pub fn backend(&self) -> &B {
+        &self.backend
+    }
+
+    pub fn backend_mut(&mut self) -> &mut B {
+        &mut self.backend
+    }
+
+    pub fn into_parts(self) -> (MatrixKeypad, B) {
+        (self.keypad, self.backend)
+    }
+}
+
+impl<B: MatrixKeypadBackend> MatrixKeypadScanner<B> {
+    pub fn poll_at(&mut self, now_ms: u64) -> Vec<KeypadEvent> {
+        let hook_on = self.backend.hook_on();
+        let backend = &mut self.backend;
+        self.keypad
+            .scan_matrix_at(|row, col| backend.read_col(row, col), hook_on, now_ms)
+    }
+}
+
+pub struct MatrixKeypadPoller {
+    stop_tx: mpsc::Sender<()>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl MatrixKeypadPoller {
+    pub fn start<B, C>(
+        mut scanner: MatrixKeypadScanner<B>,
+        interval: Duration,
+        mut callback: C,
+    ) -> Self
+    where
+        B: MatrixKeypadBackend + Send + 'static,
+        C: FnMut(KeypadEvent) + Send + 'static,
+    {
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let started = Instant::now();
+            while stop_rx.try_recv().is_err() {
+                let now_ms = duration_millis_u64(started.elapsed());
+                for event in scanner.poll_at(now_ms) {
+                    callback(event);
+                }
+                thread::sleep(interval);
+            }
+        });
+
+        Self {
+            stop_tx,
+            worker: Some(worker),
+        }
+    }
+
+    pub fn stop(&mut self) {
+        let _ = self.stop_tx.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for MatrixKeypadPoller {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

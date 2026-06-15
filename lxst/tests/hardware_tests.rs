@@ -1,4 +1,7 @@
-use lxst::{BufferedLcd1602, Key, KeyTransition, Lcd1602Buffer, Lcd1602Display, MatrixKeypad};
+use lxst::{
+    BufferedLcd1602, Key, KeyTransition, Lcd1602Buffer, Lcd1602Display, MatrixKeypad,
+    MatrixKeypadBackend, MatrixKeypadScanner,
+};
 
 #[test]
 fn keypad_4x4_layout_matches_python_driver() {
@@ -82,6 +85,52 @@ fn keypad_scan_keeps_hook_active_during_debounce_window() {
 }
 
 #[test]
+fn keypad_scanner_polls_backend_into_key_events() {
+    let mut scanner = MatrixKeypadScanner::new(
+        MatrixKeypad::gpio_4x4(),
+        FakeKeypadBackend::with_active([(2, 1)]),
+    );
+
+    let events = scanner.poll_at(500);
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].key, Key::Char('8'));
+    assert_eq!(events[0].transition, KeyTransition::Down);
+    assert_eq!(scanner.backend().reads.len(), 16);
+
+    scanner.backend_mut().active.clear();
+    let events = scanner.poll_at(520);
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].key, Key::Char('8'));
+    assert_eq!(events[0].transition, KeyTransition::Up);
+}
+
+#[test]
+fn keypad_scanner_reads_hook_state_from_backend() {
+    let mut scanner = MatrixKeypadScanner::new(
+        MatrixKeypad::gpio_4x4().with_hook(),
+        FakeKeypadBackend {
+            hook_on: Some(true),
+            ..FakeKeypadBackend::default()
+        },
+    );
+
+    let events = scanner.poll_at(1_000);
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].key, Key::Hook);
+    assert_eq!(events[0].transition, KeyTransition::Down);
+
+    scanner.backend_mut().hook_on = Some(false);
+    let events = scanner.poll_at(1_200);
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].key, Key::Hook);
+    assert_eq!(events[0].transition, KeyTransition::Up);
+}
+
+#[test]
 fn keypad_ignores_scans_with_too_many_active_keys() {
     let mut keypad = MatrixKeypad::gpio_5x5();
     let events = keypad.update_active_keys([
@@ -150,4 +199,32 @@ fn drive_ready_display(display: &mut dyn Lcd1602Display) {
     display.clear();
     display.print("Telephone Ready", 0, 0);
     display.print("", 0, 1);
+}
+
+#[derive(Debug, Default)]
+struct FakeKeypadBackend {
+    active: Vec<(usize, usize)>,
+    hook_on: Option<bool>,
+    reads: Vec<(usize, usize)>,
+}
+
+impl FakeKeypadBackend {
+    fn with_active(active: impl IntoIterator<Item = (usize, usize)>) -> Self {
+        Self {
+            active: active.into_iter().collect(),
+            hook_on: None,
+            reads: Vec::new(),
+        }
+    }
+}
+
+impl MatrixKeypadBackend for FakeKeypadBackend {
+    fn read_col(&mut self, row: usize, col: usize) -> bool {
+        self.reads.push((row, col));
+        self.active.contains(&(row, col))
+    }
+
+    fn hook_on(&mut self) -> Option<bool> {
+        self.hook_on
+    }
 }
