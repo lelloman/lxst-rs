@@ -14,6 +14,51 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[derive(Debug)]
+struct UpstreamOpusFixture {
+    source_commit: &'static str,
+    cases: &'static [OpusEncodedFixture],
+}
+
+#[derive(Debug)]
+struct OpusEncodedFixture {
+    profile_name: &'static str,
+    profile_value: u8,
+    samplerate: u32,
+    channels: u8,
+    frame_duration_ms: u16,
+    frame_count: usize,
+    max_bytes: usize,
+    hex: &'static str,
+}
+
+fn upstream_opus_fixture() -> UpstreamOpusFixture {
+    include!("fixtures/upstream_opus.rs")
+}
+
+fn opus_fixture_profile(name: &str) -> (CodecProfile, u8) {
+    match name {
+        "PROFILE_VOICE_LOW" => (CodecProfile::OpusVoiceLow, 0x00),
+        "PROFILE_VOICE_MEDIUM" => (CodecProfile::OpusVoiceMedium, 0x01),
+        "PROFILE_VOICE_HIGH" => (CodecProfile::OpusVoiceHigh, 0x02),
+        "PROFILE_VOICE_MAX" => (CodecProfile::OpusVoiceMax, 0x03),
+        "PROFILE_AUDIO_MIN" => (CodecProfile::OpusAudioMin, 0x04),
+        "PROFILE_AUDIO_LOW" => (CodecProfile::OpusAudioLow, 0x05),
+        "PROFILE_AUDIO_MEDIUM" => (CodecProfile::OpusAudioMedium, 0x06),
+        "PROFILE_AUDIO_HIGH" => (CodecProfile::OpusAudioHigh, 0x07),
+        "PROFILE_AUDIO_MAX" => (CodecProfile::OpusAudioMax, 0x08),
+        other => panic!("unknown upstream Opus profile fixture {other}"),
+    }
+}
+
+fn decode_hex(hex: &str) -> Vec<u8> {
+    assert_eq!(hex.len() % 2, 0, "hex fixtures must have even length");
+    (0..hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+        .collect()
+}
+
 #[test]
 fn raw_codec_round_trips_f32_frames() {
     let frame = AudioFrame::new(48_000, 2, vec![0.0, 0.5, -0.5, 1.0]).unwrap();
@@ -231,6 +276,38 @@ fn opus_profile_helpers_match_python_tables() {
     assert_eq!(OpusCodec::max_bytes_per_frame(8_000, 60.0), 60);
     assert_eq!(OpusCodec::max_bytes_per_frame(6_000, 2.5), 2);
     assert!(OpusCodec::profile_channels(CodecProfile::Raw).is_err());
+}
+
+#[test]
+fn opus_decodes_generated_upstream_encoded_fixtures() {
+    let fixture = upstream_opus_fixture();
+
+    assert_eq!(fixture.source_commit.len(), 40);
+    assert!(fixture.cases.len() >= 5);
+
+    for case in fixture.cases {
+        let (profile, profile_value) = opus_fixture_profile(case.profile_name);
+        assert_eq!(case.profile_value, profile_value, "{case:?}");
+
+        let info = profile.info();
+        assert_eq!(case.samplerate, info.samplerate, "{case:?}");
+        assert_eq!(case.channels, info.channels, "{case:?}");
+        assert_eq!(
+            case.frame_count,
+            (case.samplerate as usize * case.frame_duration_ms as usize) / 1000,
+            "{case:?}"
+        );
+
+        let payload = decode_hex(case.hex);
+        assert!(!payload.is_empty(), "{case:?}");
+        assert!(payload.len() <= case.max_bytes, "{case:?}");
+
+        let mut codec = OpusCodec::new(profile);
+        let decoded = codec.decode(&payload, case.samplerate).unwrap();
+        assert_eq!(decoded.samplerate(), case.samplerate, "{case:?}");
+        assert_eq!(decoded.channels(), case.channels, "{case:?}");
+        assert_eq!(decoded.frame_count(), case.frame_count, "{case:?}");
+    }
 }
 
 #[test]
