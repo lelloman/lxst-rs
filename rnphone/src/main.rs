@@ -231,6 +231,7 @@ impl App {
             self.announce(&endpoint)?;
             println!("Reticulum Telephone Service is ready");
             println!("Identity hash: {}", pretty_hash(self.identity.hash()));
+            self.became_available();
             loop {
                 self.poll_network_events();
                 self.telephone.tick();
@@ -241,6 +242,7 @@ impl App {
         println!("\nReticulum Telephone Utility is ready");
         println!("  Identity hash: {}\n", pretty_hash(self.identity.hash()));
         println!("Enter identity hash and hit enter to call (or ? for help)");
+        self.became_available();
         let stdin = io::stdin();
         loop {
             print!("> ");
@@ -417,6 +419,10 @@ impl App {
         true
     }
 
+    fn became_available(&mut self) {
+        self.hardware_ui.became_available();
+    }
+
     fn hangup_current(&mut self) {
         if self.telephone.state() == CallState::Ringing {
             self.send_signal(Signal::Code(SignalCode::Rejected));
@@ -427,6 +433,7 @@ impl App {
             let _ = node.teardown_link(link_id);
         }
         self.telephone.hangup();
+        self.became_available();
         println!("Call ended");
     }
 
@@ -473,6 +480,7 @@ impl App {
                     if self.telephone.state() != CallState::Available {
                         self.telephone.hangup();
                     }
+                    self.became_available();
                     println!("Link {link_id} closed");
                 }
             }
@@ -514,6 +522,7 @@ impl App {
                                     self.stop_ringer();
                                     self.stop_call_audio();
                                     self.active_link = None;
+                                    self.became_available();
                                 }
                             }
                             _ => {
@@ -1889,6 +1898,10 @@ mod tests {
         RnphoneConfig::parse("[phonebook]\nMary = f3e8c3359b39d36f3baff0a616a73d3e, 12\n").unwrap()
     }
 
+    fn display_config() -> RnphoneConfig {
+        RnphoneConfig::parse("[hardware]\ndisplay = i2c_lcd1602\n").unwrap()
+    }
+
     fn key_down(key: char) -> KeypadEvent {
         KeypadEvent {
             key: Key::Char(key),
@@ -2021,6 +2034,25 @@ mod tests {
         assert!(!app.test_call_audio_running);
         assert_eq!(app.test_call_audio_stops, 1);
         assert!(app.test_sent_signals.is_empty());
+    }
+
+    #[test]
+    fn hardware_display_returns_to_ready_on_call_teardown() {
+        let mut app = test_app_with_config(display_config());
+        let endpoint = TelephonyEndpoint::new(&app.identity);
+        let link_id = link_id(0x26);
+        app.handle_hardware_keypad_event(&endpoint, key_down('4'))
+            .unwrap();
+        assert_eq!(display_row(&app.hardware_ui, 0), "4               ");
+
+        app.active_link = Some(link_id.0);
+        assert!(app.telephone.begin_outgoing_call([0x27; 16]));
+        assert!(app.telephone.establish());
+        app.hangup_current();
+
+        assert_eq!(app.telephone.state(), CallState::Available);
+        assert_eq!(display_row(&app.hardware_ui, 0), "Telephone Ready ");
+        assert_eq!(display_row(&app.hardware_ui, 1), "                ");
     }
 
     #[test]
