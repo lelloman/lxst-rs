@@ -517,6 +517,8 @@ where
 {
     source: S,
     sink: QueuedOpusFileSink,
+    frames_recorded: u64,
+    samples_recorded: u64,
 }
 
 impl<S> SourceRecorder<S>
@@ -531,6 +533,8 @@ where
         Ok(Self {
             source,
             sink: QueuedOpusFileSink::create(path, config)?,
+            frames_recorded: 0,
+            samples_recorded: 0,
         })
     }
 
@@ -554,6 +558,22 @@ where
         self.source.is_running()
     }
 
+    pub fn frames_recorded(&self) -> u64 {
+        self.frames_recorded
+    }
+
+    pub fn samples_recorded(&self) -> u64 {
+        self.samples_recorded
+    }
+
+    pub fn recorded_duration(&self) -> Duration {
+        if self.source.samplerate() == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64(self.samples_recorded as f64 / self.source.samplerate() as f64)
+        }
+    }
+
     pub fn start(&mut self) {
         self.source.start();
     }
@@ -570,7 +590,10 @@ where
         let Some(frame) = self.source.next_frame()? else {
             return Ok(false);
         };
+        let frame_count = frame.frame_count() as u64;
         self.sink.handle_frame(frame)?;
+        self.frames_recorded += 1;
+        self.samples_recorded += frame_count;
         Ok(true)
     }
 }
@@ -611,6 +634,18 @@ impl FileRecorder {
     pub fn process_next(&mut self) -> Result<bool, MediaError> {
         self.inner.process_next()
     }
+
+    pub fn frames_recorded(&self) -> u64 {
+        self.inner.frames_recorded()
+    }
+
+    pub fn samples_recorded(&self) -> u64 {
+        self.inner.samples_recorded()
+    }
+
+    pub fn recorded_duration(&self) -> Duration {
+        self.inner.recorded_duration()
+    }
 }
 
 pub struct SourcePlayer<S, K>
@@ -622,6 +657,8 @@ where
     sink: K,
     finished_callback: Option<Box<dyn FnMut() + Send>>,
     finished_notified: bool,
+    frames_played: u64,
+    samples_played: u64,
 }
 
 impl<S, K> SourcePlayer<S, K>
@@ -635,6 +672,8 @@ where
             sink,
             finished_callback: None,
             finished_notified: false,
+            frames_played: 0,
+            samples_played: 0,
         }
     }
 
@@ -660,6 +699,22 @@ where
 
     pub fn playing(&self) -> bool {
         self.is_playing()
+    }
+
+    pub fn frames_played(&self) -> u64 {
+        self.frames_played
+    }
+
+    pub fn samples_played(&self) -> u64 {
+        self.samples_played
+    }
+
+    pub fn played_duration(&self) -> Duration {
+        if self.source.samplerate() == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64(self.samples_played as f64 / self.source.samplerate() as f64)
+        }
     }
 
     pub fn set_finished_callback(&mut self, callback: impl FnMut() + Send + 'static) {
@@ -696,7 +751,10 @@ where
             }
             return Ok(false);
         };
+        let frame_count = frame.frame_count() as u64;
         self.sink.handle_frame(frame)?;
+        self.frames_played += 1;
+        self.samples_played += frame_count;
         Ok(true)
     }
 
@@ -750,6 +808,18 @@ impl FilePlayer {
 
     pub fn process_next(&mut self) -> Result<bool, MediaError> {
         self.inner.process_next()
+    }
+
+    pub fn frames_played(&self) -> u64 {
+        self.inner.frames_played()
+    }
+
+    pub fn samples_played(&self) -> u64 {
+        self.inner.samples_played()
+    }
+
+    pub fn played_duration(&self) -> Duration {
+        self.inner.played_duration()
     }
 
     pub fn set_finished_callback(&mut self, callback: impl FnMut() + Send + 'static) {

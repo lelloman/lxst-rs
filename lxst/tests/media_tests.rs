@@ -194,6 +194,9 @@ fn source_player_obeys_sink_backpressure_before_pulling() {
 
     assert_eq!(player.source().pulls, 0);
     assert!(player.sink().frames.is_empty());
+    assert_eq!(player.frames_played(), 0);
+    assert_eq!(player.samples_played(), 0);
+    assert_eq!(player.played_duration(), Duration::ZERO);
 }
 
 #[test]
@@ -214,6 +217,9 @@ fn source_player_starts_outputs_frames_and_stops() {
     assert!(player.process_next().unwrap());
     assert_eq!(player.source().pulls, 1);
     assert_eq!(player.sink().frames.len(), 1);
+    assert_eq!(player.frames_played(), 1);
+    assert_eq!(player.samples_played(), 960);
+    assert_eq!(player.played_duration(), Duration::from_millis(20));
 
     player.stop().unwrap();
     assert!(!player.is_playing());
@@ -270,6 +276,9 @@ fn source_recorder_obeys_sink_backpressure_before_pulling() {
 
     assert!(!recorder.process_next().unwrap());
     assert_eq!(recorder.source().pulls, 1);
+    assert_eq!(recorder.frames_recorded(), 1);
+    assert_eq!(recorder.samples_recorded(), 960);
+    assert_eq!(recorder.recorded_duration(), Duration::from_millis(20));
 
     let _ = fs::remove_file(path);
 }
@@ -292,6 +301,9 @@ fn source_recorder_records_source_to_opus_file() {
     recorder.start();
     assert!(recorder.is_recording());
     assert!(recorder.process_next().unwrap());
+    assert_eq!(recorder.frames_recorded(), 1);
+    assert_eq!(recorder.samples_recorded(), 960);
+    assert_eq!(recorder.recorded_duration(), Duration::from_millis(20));
     recorder.stop().unwrap();
     assert!(!recorder.is_recording());
 
