@@ -6,6 +6,8 @@ use lxst_core::{CallProfile, Signal, SignalCode};
 
 use crate::audio::{list_audio_devices, AudioDeviceInfo, AudioDeviceKind, AudioError};
 
+pub const MIN_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(60 * 5);
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TelephoneConfig {
     pub ring_time: Duration,
@@ -261,6 +263,10 @@ impl Telephone {
 
     pub fn set_connect_timeout(&mut self, timeout: Duration) {
         self.config.connect_time = timeout;
+    }
+
+    pub fn set_announce_interval(&mut self, announce_interval: Duration) {
+        self.config.announce_interval = announce_interval.max(MIN_ANNOUNCE_INTERVAL);
     }
 
     pub fn busy_tone_duration(&self) -> Duration {

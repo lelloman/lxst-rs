@@ -1081,6 +1081,7 @@ fn telephone_updates_audio_control_settings() {
     telephone.mute_receive(true);
     telephone.mute_transmit(true);
     telephone.set_connect_timeout(Duration::from_secs(2));
+    telephone.set_announce_interval(Duration::from_secs(600));
     telephone.set_busy_tone_duration(Duration::ZERO);
     telephone.set_transmit_start_skip(Duration::from_millis(10));
     telephone.set_transmit_start_ease_in(Duration::from_millis(20));
@@ -1091,6 +1092,10 @@ fn telephone_updates_audio_control_settings() {
     assert!(telephone.receive_muted());
     assert!(telephone.transmit_muted());
     assert_eq!(telephone.config().connect_time, Duration::from_secs(2));
+    assert_eq!(
+        telephone.config().announce_interval,
+        Duration::from_secs(600)
+    );
     assert_eq!(telephone.busy_tone_duration(), Duration::ZERO);
     assert_eq!(telephone.transmit_start_skip(), Duration::from_millis(10));
     assert_eq!(
@@ -1104,6 +1109,18 @@ fn telephone_updates_audio_control_settings() {
     assert!(events.contains(&lxst::telephony::CallEvent::AgcChanged(false)));
     assert!(events.contains(&lxst::telephony::CallEvent::ReceiveMutedChanged(true)));
     assert!(events.contains(&lxst::telephony::CallEvent::TransmitMutedChanged(true)));
+}
+
+#[test]
+fn telephone_announce_interval_matches_upstream_minimum() {
+    let (mut telephone, _rx) = Telephone::new(TelephoneConfig::default());
+
+    telephone.set_announce_interval(Duration::from_secs(1));
+
+    assert_eq!(
+        telephone.config().announce_interval,
+        lxst::MIN_ANNOUNCE_INTERVAL
+    );
 }
 
 #[test]

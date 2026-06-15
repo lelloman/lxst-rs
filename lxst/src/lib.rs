@@ -39,7 +39,9 @@ pub use lxst_core::{
     CallProfile, CodecHeader, CodecKind, CodecProfile, EncodedFrame, FrameDuration, LxstPacket,
     PacketError, RawBitDepth, RawFrameHeader, Signal, SignalCode,
 };
-pub use telephony::{CallEvent, CallState, CallerPolicy, Telephone, TelephoneConfig};
+pub use telephony::{
+    CallEvent, CallState, CallerPolicy, Telephone, TelephoneConfig, MIN_ANNOUNCE_INTERVAL,
+};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
