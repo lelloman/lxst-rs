@@ -172,6 +172,8 @@ struct App {
     test_ringer_stops: usize,
     #[cfg(test)]
     test_call_audio_stops: usize,
+    #[cfg(test)]
+    test_torn_down_links: Vec<[u8; 16]>,
 }
 
 impl App {
@@ -240,6 +242,8 @@ impl App {
             test_ringer_stops: 0,
             #[cfg(test)]
             test_call_audio_stops: 0,
+            #[cfg(test)]
+            test_torn_down_links: Vec::new(),
         })
     }
 
@@ -578,9 +582,7 @@ impl App {
                     println!("Link {link_id} established to {dest_hash}");
                 } else if self.telephone.is_busy() || self.active_link.is_some() {
                     self.send_signal_to(link_id.0, Signal::Code(SignalCode::Busy));
-                    if let Some(node) = self.node.as_ref() {
-                        let _ = node.teardown_link(link_id.0);
-                    }
+                    self.teardown_link(link_id.0);
                     println!("Incoming link {link_id} rejected as busy");
                 } else {
                     self.active_link = Some(link_id.0);
@@ -616,6 +618,7 @@ impl App {
                         println!("Incoming call from {identity_hash}");
                     } else {
                         self.send_signal(Signal::Code(SignalCode::Busy));
+                        self.teardown_link(link_id.0);
                         self.active_link = None;
                         println!("Rejected incoming call from {identity_hash}");
                     }
@@ -778,6 +781,18 @@ impl App {
     fn send_signal_to_node(node: Arc<RnsNode>, link_id: [u8; 16], signal: Signal) {
         let sender = LxstLinkSender::new(node, link_id);
         let _ = sender.send_signal(signal);
+    }
+
+    #[cfg(test)]
+    fn teardown_link(&mut self, link_id: [u8; 16]) {
+        self.test_torn_down_links.push(link_id);
+    }
+
+    #[cfg(not(test))]
+    fn teardown_link(&mut self, link_id: [u8; 16]) {
+        if let Some(node) = self.node.as_ref() {
+            let _ = node.teardown_link(link_id);
+        }
     }
 
     fn print_phonebook(&self) {
@@ -2419,6 +2434,7 @@ mod tests {
             test_ringer_starts: 0,
             test_ringer_stops: 0,
             test_call_audio_stops: 0,
+            test_torn_down_links: Vec::new(),
         }
     }
 
@@ -2729,6 +2745,7 @@ mod tests {
             app.test_sent_signals,
             vec![(new_link.0, Signal::Code(SignalCode::Busy))]
         );
+        assert_eq!(app.test_torn_down_links, vec![new_link.0]);
     }
 
     #[test]
@@ -2750,6 +2767,7 @@ mod tests {
             app.test_sent_signals,
             vec![(link_id.0, Signal::Code(SignalCode::Busy))]
         );
+        assert_eq!(app.test_torn_down_links, vec![link_id.0]);
         assert_eq!(app.test_ringer_starts, 0);
     }
 
