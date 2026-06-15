@@ -222,6 +222,30 @@ impl Pipeline {
         }
     }
 
+    pub fn source(&self) -> &dyn AudioSource {
+        self.source.as_ref()
+    }
+
+    pub fn source_mut(&mut self) -> &mut dyn AudioSource {
+        self.source.as_mut()
+    }
+
+    pub fn codec(&self) -> &dyn AudioCodec {
+        self.codec.as_ref()
+    }
+
+    pub fn codec_mut(&mut self) -> &mut dyn AudioCodec {
+        self.codec.as_mut()
+    }
+
+    pub fn sink(&self) -> &dyn AudioSink {
+        self.sink.as_ref()
+    }
+
+    pub fn sink_mut(&mut self) -> &mut dyn AudioSink {
+        self.sink.as_mut()
+    }
+
     pub fn start(&mut self) {
         self.source.start();
     }

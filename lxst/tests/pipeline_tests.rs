@@ -47,6 +47,27 @@ fn pipeline_encodes_source_frames_into_sink() {
 }
 
 #[test]
+fn pipeline_exposes_source_codec_and_sink_relationships() {
+    let source = BufferedSource::new(8_000, 1).unwrap();
+    let sink = BufferedSink::new(4);
+    let mut pipeline = Pipeline::new(
+        Box::new(source),
+        Box::new(RawCodec::new(RawBitDepth::Float32)),
+        Box::new(sink),
+    );
+
+    assert_eq!(pipeline.source().samplerate(), 8_000);
+    assert_eq!(pipeline.source().channels(), 1);
+    assert_eq!(pipeline.codec().kind(), CodecKind::Raw);
+    assert!(pipeline.sink().can_receive());
+
+    pipeline.source_mut().start();
+    assert!(pipeline.source().is_running());
+    pipeline.source_mut().stop();
+    assert!(!pipeline.source().is_running());
+}
+
+#[test]
 fn buffered_sink_applies_backpressure() {
     let mut sink = BufferedSink::new(1);
     assert!(sink.can_receive());
