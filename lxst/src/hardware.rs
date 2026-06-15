@@ -25,6 +25,7 @@ pub struct MatrixKeypad {
     key_map: Vec<Key>,
     key_states: HashMap<Key, bool>,
     max_active_keys: usize,
+    hook_last_active_ms: Option<u64>,
 }
 
 impl MatrixKeypad {
@@ -68,6 +69,7 @@ impl MatrixKeypad {
             key_map,
             key_states,
             max_active_keys: 4,
+            hook_last_active_ms: None,
         }
     }
 
@@ -77,6 +79,46 @@ impl MatrixKeypad {
             self.key_states.insert(Key::Hook, false);
         }
         self
+    }
+
+    pub fn scan_matrix_at<F>(
+        &mut self,
+        mut read_col: F,
+        hook_on: Option<bool>,
+        now_ms: u64,
+    ) -> Vec<KeypadEvent>
+    where
+        F: FnMut(usize, usize) -> bool,
+    {
+        let mut active_keys = Vec::new();
+        for row in 0..self.rows {
+            for col in 0..self.cols {
+                if read_col(row, col) {
+                    if let Some(key) = self.key_at(row, col) {
+                        active_keys.push(key);
+                    }
+                }
+            }
+        }
+
+        if let Some(hook_on) = hook_on {
+            if hook_on {
+                active_keys.push(Key::Hook);
+                self.hook_last_active_ms = Some(now_ms);
+            } else if self.is_down(Key::Hook) {
+                let elapsed = self
+                    .hook_last_active_ms
+                    .map(|last| now_ms.saturating_sub(last))
+                    .unwrap_or(u64::MAX);
+                if elapsed < Self::HOOK_DEBOUNCE_MS {
+                    active_keys.push(Key::Hook);
+                } else {
+                    self.hook_last_active_ms = Some(now_ms);
+                }
+            }
+        }
+
+        self.update_active_keys(active_keys)
     }
 
     pub fn rows(&self) -> usize {

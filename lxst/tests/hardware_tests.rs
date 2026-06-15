@@ -45,6 +45,43 @@ fn keypad_reports_down_and_up_transitions_in_map_order() {
 }
 
 #[test]
+fn keypad_scan_maps_active_rows_and_columns_to_events() {
+    let mut keypad = MatrixKeypad::gpio_4x4();
+
+    let events = keypad.scan_matrix_at(|row, col| (row, col) == (1, 2), None, 1_000);
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].key, Key::Char('6'));
+    assert_eq!(events[0].transition, KeyTransition::Down);
+    assert!(keypad.is_down(Key::Char('6')));
+
+    let events = keypad.scan_matrix_at(|_, _| false, None, 1_020);
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].key, Key::Char('6'));
+    assert_eq!(events[0].transition, KeyTransition::Up);
+}
+
+#[test]
+fn keypad_scan_keeps_hook_active_during_debounce_window() {
+    let mut keypad = MatrixKeypad::gpio_4x4().with_hook();
+
+    let events = keypad.scan_matrix_at(|_, _| false, Some(true), 1_000);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].key, Key::Hook);
+    assert_eq!(events[0].transition, KeyTransition::Down);
+
+    let events = keypad.scan_matrix_at(|_, _| false, Some(false), 1_100);
+    assert!(events.is_empty());
+    assert!(keypad.is_down(Key::Hook));
+
+    let events = keypad.scan_matrix_at(|_, _| false, Some(false), 1_151);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].key, Key::Hook);
+    assert_eq!(events[0].transition, KeyTransition::Up);
+}
+
+#[test]
 fn keypad_ignores_scans_with_too_many_active_keys() {
     let mut keypad = MatrixKeypad::gpio_5x5();
     let events = keypad.update_active_keys([
