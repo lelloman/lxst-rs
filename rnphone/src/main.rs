@@ -131,7 +131,6 @@ impl Args {
 
 #[cfg_attr(test, allow(dead_code))]
 struct App {
-    config_dir: PathBuf,
     rnsconfig: Option<PathBuf>,
     config: RnphoneConfig,
     identity: Identity,
@@ -192,7 +191,6 @@ impl App {
         let (telephone, _events) = Telephone::new(telephone_config);
 
         Ok(Self {
-            config_dir,
             rnsconfig,
             config,
             identity,
@@ -223,15 +221,12 @@ impl App {
 
     fn start(&mut self) -> Result<(), String> {
         let endpoint = TelephonyEndpoint::new(&self.identity);
-        println!("Reticulum Telephone Utility is ready");
-        println!("  Identity hash: {}", hex(self.identity.hash()));
-        println!("  Destination hash: {}", hex(&endpoint.destination.hash.0));
-        println!("  Config: {}", self.config_dir.display());
 
         if self.service {
             self.ensure_network(&endpoint)?;
             self.announce(&endpoint)?;
-            println!("Service mode running");
+            println!("Reticulum Telephone Service is ready");
+            println!("Identity hash: {}", pretty_hash(self.identity.hash()));
             loop {
                 self.poll_network_events();
                 self.telephone.tick();
@@ -239,7 +234,9 @@ impl App {
             }
         }
 
-        println!("Enter an identity hash to stage a call, or ? for help");
+        println!("\nReticulum Telephone Utility is ready");
+        println!("  Identity hash: {}\n", pretty_hash(self.identity.hash()));
+        println!("Enter identity hash and hit enter to call (or ? for help)");
         let stdin = io::stdin();
         loop {
             print!("> ");
@@ -259,15 +256,15 @@ impl App {
             match line {
                 "?" | "h" | "help" => print_help_menu(),
                 "q" | "quit" | "exit" => break,
-                "i" | "identity" => println!("Identity hash: {}", hex(self.identity.hash())),
+                "i" | "identity" => print!("{}", identity_status(self.identity.hash())),
                 "d" | "desthash" => {
-                    println!("Destination hash: {}", hex(&endpoint.destination.hash.0))
+                    print!("{}", destination_status(&endpoint.destination.hash.0))
                 }
                 "p" | "phonebook" => self.print_phonebook(),
-                "a" | "announce" => self.announce(&endpoint)?,
+                "a" | "announce" | "anounce" => self.announce(&endpoint)?,
                 "r" | "redial" => match self.last_dialed {
                     Some(hash) => self.dial_hash(&endpoint, hash)?,
-                    None => println!("Redial requires a completed call target"),
+                    None => println!("No last call to redial"),
                 },
                 "answer" => {
                     if self.telephone.answer() {
@@ -324,7 +321,7 @@ impl App {
                 &self.identity,
             )
             .map_err(|e| e.to_string())?;
-        println!("Announced {}", hex(&endpoint.destination.hash.0));
+        println!("Announce sent");
         Ok(())
     }
 
@@ -360,7 +357,11 @@ impl App {
         if self.telephone.begin_outgoing_call(identity_hash) {
             self.active_link = Some(link_id);
             self.last_dialed = Some(identity_hash);
-            println!("Dialing {} on link {}", hex(&identity_hash), hex(&link_id));
+            println!(
+                "Calling {} on link {}...",
+                pretty_hash(&identity_hash),
+                pretty_hash(&link_id)
+            );
         } else {
             let _ = node.teardown_link(link_id);
             println!("Telephone is busy");
@@ -584,17 +585,7 @@ impl App {
     }
 
     fn print_phonebook(&self) {
-        if self.config.phonebook.is_empty() {
-            println!("No entries in phonebook");
-            return;
-        }
-        println!("Phonebook");
-        for (name, entry) in &self.config.phonebook {
-            match &entry.alias {
-                Some(alias) => println!("  {alias} {name}: {}", hex(&entry.identity_hash)),
-                None => println!("  {name}: {}", hex(&entry.identity_hash)),
-            }
-        }
+        print!("{}", phonebook_menu(&self.config));
     }
 }
 
@@ -791,6 +782,7 @@ fn run_call_audio_loop(
 #[derive(Debug, Clone)]
 struct RnphoneConfig {
     phonebook: HashMap<String, PhonebookEntry>,
+    phonebook_order: Vec<String>,
     allowed_callers: lxst::CallerPolicy,
     allow_phonebook_callers: bool,
     blocked_callers: HashSet<[u8; 16]>,
@@ -825,6 +817,7 @@ impl Default for RnphoneConfig {
     fn default() -> Self {
         Self {
             phonebook: HashMap::new(),
+            phonebook_order: Vec::new(),
             allowed_callers: lxst::CallerPolicy::All,
             allow_phonebook_callers: false,
             blocked_callers: HashSet::new(),
@@ -901,6 +894,9 @@ impl RnphoneConfig {
                             .get(1)
                             .map(|s| s.chars().filter(|c| c.is_ascii_digit()).collect::<String>())
                             .filter(|s| !s.is_empty());
+                        if !config.phonebook.contains_key(key) {
+                            config.phonebook_order.push(key.to_string());
+                        }
                         config.phonebook.insert(
                             key.to_string(),
                             PhonebookEntry {
@@ -932,6 +928,8 @@ impl RnphoneConfig {
     fn finalize_for_identity(&mut self, own_hash: &[u8; 16]) {
         self.phonebook
             .retain(|_, entry| &entry.identity_hash != own_hash);
+        self.phonebook_order
+            .retain(|name| self.phonebook.contains_key(name));
         self.blocked_callers.remove(own_hash);
         match &mut self.allowed_callers {
             lxst::CallerPolicy::List(allowed) => {
@@ -949,7 +947,8 @@ impl RnphoneConfig {
     }
 
     fn resolve_dial_target(&self, input: &str) -> Option<DialTarget> {
-        self.phonebook.iter().find_map(|(name, entry)| {
+        self.phonebook_order.iter().find_map(|name| {
+            let entry = self.phonebook.get(name)?;
             let alias_matches = entry.alias.as_deref() == Some(input);
             let name_matches = name.eq_ignore_ascii_case(input);
             if alias_matches || name_matches {
@@ -1052,6 +1051,62 @@ fn decode_hex_into(value: &str, out: &mut [u8]) -> Result<(), String> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn pretty_hash(bytes: &[u8]) -> String {
+    format!("<{}>", hex(bytes))
+}
+
+fn identity_status(identity_hash: &[u8]) -> String {
+    format!(
+        "Identity hash of this telephone: {}\n",
+        pretty_hash(identity_hash)
+    )
+}
+
+fn destination_status(destination_hash: &[u8]) -> String {
+    format!(
+        "Destination hash of this telephone: {}\n",
+        pretty_hash(destination_hash)
+    )
+}
+
+fn phonebook_menu(config: &RnphoneConfig) -> String {
+    if config.phonebook_order.is_empty() {
+        return "\nNo entries in phonebook\n".to_string();
+    }
+
+    let max_name_len = config
+        .phonebook_order
+        .iter()
+        .map(|name| name.len())
+        .max()
+        .unwrap_or(0);
+    let max_alias_len = config
+        .phonebook_order
+        .iter()
+        .filter_map(|name| config.phonebook.get(name))
+        .filter_map(|entry| entry.alias.as_ref().map(String::len))
+        .max()
+        .unwrap_or(0);
+    let max_index_len = config.phonebook_order.len().to_string().len();
+    let alias_width = max_alias_len.max(max_index_len);
+
+    let mut output = String::from("\nPhonebook\n");
+    for (index, name) in config.phonebook_order.iter().enumerate() {
+        let Some(entry) = config.phonebook.get(name) else {
+            continue;
+        };
+        let alias = entry
+            .alias
+            .clone()
+            .unwrap_or_else(|| (index + 1).to_string());
+        output.push_str(&format!(
+            "  {alias:>alias_width$} {name:<max_name_len$} : {}\n",
+            pretty_hash(&entry.identity_hash)
+        ));
+    }
+    output
 }
 
 fn default_config_dir() -> PathBuf {
@@ -1274,6 +1329,57 @@ mod tests {
     }
 
     #[test]
+    fn formats_identity_and_destination_status_like_upstream() {
+        let hash = parse_hash("f3e8c3359b39d36f3baff0a616a73d3e").unwrap();
+
+        assert_eq!(
+            identity_status(&hash),
+            "Identity hash of this telephone: <f3e8c3359b39d36f3baff0a616a73d3e>\n"
+        );
+        assert_eq!(
+            destination_status(&hash),
+            "Destination hash of this telephone: <f3e8c3359b39d36f3baff0a616a73d3e>\n"
+        );
+    }
+
+    #[test]
+    fn formats_empty_phonebook_like_upstream() {
+        let config = RnphoneConfig::default();
+
+        assert_eq!(phonebook_menu(&config), "\nNo entries in phonebook\n");
+    }
+
+    #[test]
+    fn formats_phonebook_in_config_order_with_aligned_aliases() {
+        let config = RnphoneConfig::parse(
+            "[phonebook]\nMary = f3e8c3359b39d36f3baff0a616a73d3e, A1B2\nAlexander = 5d2d14619dfa0ff06278c17347c14331\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            phonebook_menu(&config),
+            "\nPhonebook\n  12 Mary      : <f3e8c3359b39d36f3baff0a616a73d3e>\n   2 Alexander : <5d2d14619dfa0ff06278c17347c14331>\n"
+        );
+    }
+
+    #[test]
+    fn finalization_removes_own_identity_from_phonebook_order() {
+        let own = parse_hash("f3e8c3359b39d36f3baff0a616a73d3e").unwrap();
+        let mut config = RnphoneConfig::parse(
+            "[phonebook]\nMary = f3e8c3359b39d36f3baff0a616a73d3e, 123\nRudy = 5d2d14619dfa0ff06278c17347c14331, 241\n",
+        )
+        .unwrap();
+
+        config.finalize_for_identity(&own);
+
+        assert_eq!(config.phonebook_order, vec!["Rudy"]);
+        assert_eq!(
+            phonebook_menu(&config),
+            "\nPhonebook\n  241 Rudy : <5d2d14619dfa0ff06278c17347c14331>\n"
+        );
+    }
+
+    #[test]
     fn installs_default_sound_assets_when_missing() {
         let dir = temp_config_dir("install-assets");
         fs::create_dir_all(&dir).unwrap();
@@ -1315,7 +1421,6 @@ mod tests {
         };
         let (telephone, _events) = Telephone::new(telephone_config);
         App {
-            config_dir: temp_config_dir("event-app"),
             rnsconfig: None,
             config,
             identity,
