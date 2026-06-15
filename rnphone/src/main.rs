@@ -408,6 +408,7 @@ impl App {
         let node = self.node.as_ref().expect("node is initialized");
         let dest_hash = telephony_dest_hash(identity_hash);
         println!("Requesting path to {}", hex(&dest_hash.0));
+        self.hardware_ui.show_finding_path();
         if !request_path_until(
             node,
             dest_hash,
@@ -416,7 +417,10 @@ impl App {
         )
         .map_err(|e| e.to_string())?
         {
-            return Err(format!("no path to {}", hex(&dest_hash.0)));
+            println!("Path request timed out");
+            self.hardware_ui.show_path_timeout();
+            self.became_available();
+            return Ok(());
         }
 
         let announced = recall_telephony_identity(node, identity_hash)
@@ -431,6 +435,7 @@ impl App {
                 pretty_hash(&identity_hash),
                 pretty_hash(&link_id)
             );
+            self.hardware_ui.show_calling(None);
         } else {
             let _ = node.teardown_link(link_id);
             println!("Telephone is busy");
@@ -449,6 +454,7 @@ impl App {
         if let Some(link_id) = self.active_link {
             self.start_call_audio(link_id);
         }
+        self.hardware_ui.show_call_connected();
         true
     }
 
@@ -538,6 +544,7 @@ impl App {
                     let _ = self.telephone.establish();
                     self.send_signal(Signal::Code(SignalCode::Established));
                     self.start_call_audio(link_id.0);
+                    self.hardware_ui.show_call_connected();
                     println!("Link {link_id} established to {dest_hash}");
                 } else {
                     println!("Incoming link {link_id} from {dest_hash}");
@@ -565,6 +572,8 @@ impl App {
                     if self.telephone.begin_incoming_call(identity_hash.0) {
                         self.send_signal(Signal::Code(SignalCode::Ringing));
                         self.start_ringer();
+                        self.hardware_ui
+                            .show_incoming_call(identity_hash.0, &self.config);
                         println!("Incoming call from {identity_hash}");
                     } else {
                         self.send_signal(Signal::Code(SignalCode::Busy));
@@ -586,6 +595,7 @@ impl App {
                                     if let Some(link_id) = self.active_link {
                                         self.start_call_audio(link_id);
                                     }
+                                    self.hardware_ui.show_call_connected();
                                 }
                             }
                             Signal::Code(SignalCode::Busy | SignalCode::Rejected) => {
@@ -1233,6 +1243,13 @@ impl RnphoneConfig {
             (entry.alias.as_deref() == Some(input)).then_some(name.as_str())
         })
     }
+
+    fn phonebook_entry_by_hash(&self, identity_hash: &[u8; 16]) -> Option<(&str, &PhonebookEntry)> {
+        self.phonebook_order.iter().find_map(|name| {
+            let entry = self.phonebook.get(name)?;
+            (entry.identity_hash == *identity_hash).then_some((name.as_str(), entry))
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1391,6 +1408,64 @@ impl HardwareUi {
             true
         } else {
             false
+        }
+    }
+
+    fn show_finding_path(&mut self) {
+        if let Some(display) = &mut self.display {
+            display.print("Finding path...", 0, 0);
+        }
+    }
+
+    fn show_path_timeout(&mut self) {
+        if let Some(display) = &mut self.display {
+            display.print("Finding path", 0, 0);
+            display.print("timed out", 0, 1);
+        }
+    }
+
+    fn show_calling(&mut self, hops: Option<usize>) {
+        if let Some(display) = &mut self.display {
+            let value = match hops {
+                Some(hops) => {
+                    let suffix = if hops == 1 {
+                        format!("({hops}h)")
+                    } else {
+                        format!("({hops}hs)")
+                    };
+                    format!(
+                        "Calling{}{}",
+                        " ".repeat(Lcd1602Buffer::COLS.saturating_sub(7 + suffix.len())),
+                        suffix
+                    )
+                }
+                None => "Calling".to_string(),
+            };
+            display.print(&value, 0, 0);
+        }
+    }
+
+    fn show_incoming_call(&mut self, identity_hash: [u8; 16], config: &RnphoneConfig) {
+        if let Some(display) = &mut self.display {
+            let hash = hex(&identity_hash);
+            if let Some((name, entry)) = config.phonebook_entry_by_hash(&identity_hash) {
+                display.print(name, 0, 0);
+                let alias = entry
+                    .alias
+                    .as_deref()
+                    .map(|alias| format!("({alias})"))
+                    .unwrap_or_default();
+                display.print(&right_align_lcd(&alias), 0, 1);
+            } else {
+                display.print(&hash[..Lcd1602Buffer::COLS], 0, 0);
+                display.print(&hash[Lcd1602Buffer::COLS..], 0, 1);
+            }
+        }
+    }
+
+    fn show_call_connected(&mut self) {
+        if let Some(display) = &mut self.display {
+            display.print("Call connected", 0, 0);
         }
     }
 
@@ -1591,6 +1666,14 @@ fn hex(bytes: &[u8]) -> String {
 
 fn pretty_hash(bytes: &[u8]) -> String {
     format!("<{}>", hex(bytes))
+}
+
+fn right_align_lcd(value: &str) -> String {
+    if value.len() >= Lcd1602Buffer::COLS {
+        value.to_string()
+    } else {
+        format!("{value:>width$}", width = Lcd1602Buffer::COLS)
+    }
 }
 
 fn identity_status(identity_hash: &[u8]) -> String {
@@ -2014,6 +2097,39 @@ mod tests {
 
         assert!(!ui.sleep_if_idle(HW_SLEEP_TIMEOUT, CallState::Available, true));
         assert_eq!(ui.mode, HardwareMode::Idle);
+    }
+
+    #[test]
+    fn hardware_display_shows_path_and_call_status_like_upstream() {
+        let mut ui = HardwareUi::new(true);
+
+        ui.show_finding_path();
+        assert_eq!(display_row(&ui, 0), "Finding path... ");
+
+        ui.show_path_timeout();
+        assert_eq!(display_row(&ui, 0), "Finding path    ");
+        assert_eq!(display_row(&ui, 1), "timed out       ");
+
+        ui.show_calling(Some(1));
+        assert_eq!(display_row(&ui, 0), "Calling     (1h)");
+
+        ui.show_call_connected();
+        assert_eq!(display_row(&ui, 0), "Call connected  ");
+    }
+
+    #[test]
+    fn hardware_display_shows_incoming_phonebook_alias_or_hash() {
+        let config = phonebook_config();
+        let caller = parse_hash("f3e8c3359b39d36f3baff0a616a73d3e").unwrap();
+        let mut ui = HardwareUi::new(true);
+
+        ui.show_incoming_call(caller, &config);
+        assert_eq!(display_row(&ui, 0), "Mary            ");
+        assert_eq!(display_row(&ui, 1), "            (12)");
+
+        ui.show_incoming_call([0xAB; 16], &config);
+        assert_eq!(display_row(&ui, 0), "abababababababab");
+        assert_eq!(display_row(&ui, 1), "abababababababab");
     }
 
     #[test]
@@ -2447,7 +2563,7 @@ mod tests {
 
     #[test]
     fn incoming_remote_identity_rings_and_tracks_link() {
-        let mut app = test_app();
+        let mut app = test_app_with_config(display_config());
         let link_id = link_id(0x11);
         let caller = identity_hash(0x22);
 
@@ -2461,6 +2577,8 @@ mod tests {
         );
         assert!(app.test_ringer_running);
         assert_eq!(app.test_ringer_starts, 1);
+        assert_eq!(display_row(&app.hardware_ui, 0), "2222222222222222");
+        assert_eq!(display_row(&app.hardware_ui, 1), "2222222222222222");
     }
 
     #[test]
@@ -2507,7 +2625,7 @@ mod tests {
 
     #[test]
     fn outgoing_link_established_sends_established_and_starts_audio() {
-        let mut app = test_app();
+        let mut app = test_app_with_config(display_config());
         let remote = [0x66; 16];
         let link_id = link_id(0x67);
         assert!(app.telephone.begin_outgoing_call(remote));
@@ -2522,6 +2640,7 @@ mod tests {
         );
         assert_eq!(app.test_started_audio, vec![link_id.0]);
         assert!(app.test_call_audio_running);
+        assert_eq!(display_row(&app.hardware_ui, 0), "Call connected  ");
     }
 
     #[test]
