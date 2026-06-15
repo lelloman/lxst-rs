@@ -645,7 +645,9 @@ impl App {
                                     self.stop_ringer();
                                     self.stop_call_audio();
                                     self.clear_call_status();
-                                    self.active_link = None;
+                                    if let Some(link_id) = self.active_link.take() {
+                                        self.teardown_link(link_id);
+                                    }
                                     self.became_available();
                                 }
                             }
@@ -2836,6 +2838,7 @@ mod tests {
         assert_eq!(app.active_link, None);
         assert!(!app.test_call_audio_running);
         assert_eq!(app.test_call_audio_stops, 1);
+        assert_eq!(app.test_torn_down_links, vec![link_id.0]);
     }
 
     #[test]
@@ -2853,6 +2856,7 @@ mod tests {
         assert_eq!(app.active_link, None);
         assert!(!app.test_ringer_running);
         assert_eq!(app.test_ringer_stops, 1);
+        assert_eq!(app.test_torn_down_links, vec![link_id.0]);
     }
 
     #[test]
