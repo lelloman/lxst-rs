@@ -53,6 +53,46 @@ fn raw_codec_rejects_truncated_f16_payloads() {
 }
 
 #[test]
+fn raw_codec_fixed_channels_duplicates_missing_channels_like_python() {
+    let frame = AudioFrame::new(48_000, 1, vec![0.25, -0.5]).unwrap();
+    let mut codec = RawCodec::with_channels(RawBitDepth::Float32, 2);
+
+    let encoded = codec.encode(&frame).unwrap();
+    assert_eq!(encoded[0], 0b0100_0001);
+
+    let decoded = codec.decode(&encoded, 48_000).unwrap();
+    assert_eq!(codec.channels(), Some(2));
+    assert_eq!(decoded.channels(), 2);
+    assert_eq!(decoded.samples(), &[0.25, 0.25, -0.5, -0.5]);
+}
+
+#[test]
+fn raw_codec_fixed_channels_truncates_extra_channels_like_python() {
+    let frame = AudioFrame::new(48_000, 2, vec![0.25, 0.75, -0.5, -1.0]).unwrap();
+    let mut codec = RawCodec::with_channels(RawBitDepth::Float32, 1);
+
+    let encoded = codec.encode(&frame).unwrap();
+    assert_eq!(encoded[0], 0b0100_0000);
+
+    let decoded = codec.decode(&encoded, 48_000).unwrap();
+    assert_eq!(codec.channels(), Some(1));
+    assert_eq!(decoded.channels(), 1);
+    assert_eq!(decoded.samples(), &[0.25, -0.5]);
+}
+
+#[test]
+fn raw_codec_fixed_channels_are_clamped_like_python() {
+    assert_eq!(
+        RawCodec::with_channels(RawBitDepth::Float32, 0).channels(),
+        Some(1)
+    );
+    assert_eq!(
+        RawCodec::with_channels(RawBitDepth::Float32, u8::MAX).channels(),
+        Some(32)
+    );
+}
+
+#[test]
 fn audio_frame_normalizes_channels_for_device_output() {
     let mono = AudioFrame::new(48_000, 1, vec![0.25, -0.5]).unwrap();
     let stereo = mono.with_channels(2).unwrap();

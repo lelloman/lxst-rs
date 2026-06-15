@@ -48,6 +48,13 @@ impl RawCodec {
         }
     }
 
+    pub fn with_channels(bit_depth: RawBitDepth, channels: u8) -> Self {
+        Self {
+            bit_depth,
+            channels: Some(channels.clamp(1, 32)),
+        }
+    }
+
     pub fn channels(&self) -> Option<u8> {
         self.channels
     }
@@ -65,7 +72,12 @@ impl AudioCodec for RawCodec {
     }
 
     fn encode(&mut self, frame: &AudioFrame) -> Result<Vec<u8>, CodecError> {
-        self.channels = Some(frame.channels());
+        let frame = if let Some(channels) = self.channels {
+            frame.with_channels(channels)?
+        } else {
+            self.channels = Some(frame.channels());
+            frame.clone()
+        };
         let header = RawFrameHeader::new(self.bit_depth, frame.channels())?;
         let sample_width = usize::from(self.bit_depth.bits() / 8);
         let mut bytes = Vec::with_capacity(1 + frame.samples().len() * sample_width);
@@ -99,7 +111,9 @@ impl AudioCodec for RawCodec {
     fn decode(&mut self, data: &[u8], samplerate: u32) -> Result<AudioFrame, CodecError> {
         let (&header, payload) = data.split_first().ok_or(CodecError::EmptyFrame)?;
         let header = RawFrameHeader::decode(header)?;
-        self.channels = Some(header.channels);
+        if self.channels.is_none() {
+            self.channels = Some(header.channels);
+        }
 
         let samples = match header.bit_depth {
             RawBitDepth::Float16 => {
