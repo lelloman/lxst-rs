@@ -16,6 +16,7 @@ struct UpstreamCoreFixture {
     codec2_modes: &'static [Codec2ModeFixture],
     raw_frame_headers: &'static [RawFrameHeaderFixture],
     packet_cases: &'static [PacketFixture],
+    malformed_packet_cases: &'static [PacketFixture],
 }
 
 #[derive(Debug)]
@@ -169,7 +170,8 @@ fn generated_fixture_is_from_current_upstream_shape() {
             (3200, 6),
         ]
     );
-    assert!(fixture.packet_cases.len() >= 4);
+    assert!(fixture.packet_cases.len() >= 7);
+    assert!(fixture.malformed_packet_cases.len() >= 9);
 }
 
 #[test]
@@ -346,8 +348,50 @@ fn decodes_generated_python_packet_fixtures() {
                 );
                 assert_eq!(decoded.encode().unwrap(), decode_hex(packet.hex));
             }
+            "empty_packet" => {
+                assert!(decoded.is_empty());
+                assert_eq!(decoded.encode().unwrap(), decode_hex(packet.hex));
+            }
+            "status_sequence_and_all_codecs" => {
+                assert_eq!(
+                    decoded.signals,
+                    vec![
+                        Signal::Code(SignalCode::Busy),
+                        Signal::Code(SignalCode::Rejected),
+                        Signal::Code(SignalCode::Available),
+                        Signal::Code(SignalCode::Established),
+                    ]
+                );
+                assert_eq!(
+                    decoded.frames,
+                    vec![
+                        EncodedFrame::new(CodecKind::Raw, vec![0x01, 0x02]),
+                        EncodedFrame::new(CodecKind::Opus, vec![0x03]),
+                        EncodedFrame::new(CodecKind::Codec2, vec![0x04, 0x05]),
+                        EncodedFrame::new(CodecKind::Null, vec![0x06]),
+                    ]
+                );
+                assert_eq!(decoded.encode().unwrap(), decode_hex(packet.hex));
+            }
+            "unknown_field_is_ignored" => {
+                assert_eq!(decoded.signals, vec![Signal::Code(SignalCode::Available)]);
+                assert!(decoded.frames.is_empty());
+            }
             other => panic!("unhandled upstream packet fixture {other}"),
         }
+    }
+}
+
+#[test]
+fn rejects_generated_malformed_python_packet_fixtures() {
+    let fixture = upstream_fixture();
+
+    for packet in fixture.malformed_packet_cases {
+        assert!(
+            LxstPacket::decode(&decode_hex(packet.hex)).is_err(),
+            "malformed packet fixture should be rejected: {}",
+            packet.name
+        );
     }
 }
 

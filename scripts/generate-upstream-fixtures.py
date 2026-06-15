@@ -116,6 +116,25 @@ def msgpack_uint(value: int) -> bytes:
     return bytes([0xCE]) + value.to_bytes(4, "big")
 
 
+def msgpack_int(value: int) -> bytes:
+    if value >= 0:
+        return msgpack_uint(value)
+    if value >= -32:
+        return bytes([(0x100 + value) & 0xFF])
+    if value >= -128:
+        return bytes([0xD0, value & 0xFF])
+    raise ValueError("fixture negative integer out of range")
+
+
+def msgpack_str(value: str) -> bytes:
+    encoded = value.encode("utf-8")
+    if len(encoded) < 32:
+        return bytes([0xA0 | len(encoded)]) + encoded
+    if len(encoded) <= 0xFF:
+        return bytes([0xD9, len(encoded)]) + encoded
+    raise ValueError("fixture string too large")
+
+
 def msgpack_bin(value: bytes) -> bytes:
     if len(value) <= 0xFF:
         return bytes([0xC4, len(value)]) + value
@@ -223,6 +242,90 @@ def main() -> None:
                 ]
             ),
         ),
+        (
+            "empty_packet",
+            msgpack_map([]),
+        ),
+        (
+            "status_sequence_and_all_codecs",
+            msgpack_map(
+                [
+                    (
+                        fields["FIELD_SIGNALLING"],
+                        msgpack_array(
+                            [
+                                msgpack_uint(signal_constants["STATUS_BUSY"]),
+                                msgpack_uint(signal_constants["STATUS_REJECTED"]),
+                                msgpack_uint(signal_constants["STATUS_AVAILABLE"]),
+                                msgpack_uint(signal_constants["STATUS_ESTABLISHED"]),
+                            ]
+                        ),
+                    ),
+                    (
+                        fields["FIELD_FRAMES"],
+                        msgpack_array(
+                            [
+                                msgpack_bin(bytes([codec_headers["RAW"], 0x01, 0x02])),
+                                msgpack_bin(bytes([codec_headers["OPUS"], 0x03])),
+                                msgpack_bin(bytes([codec_headers["CODEC2"], 0x04, 0x05])),
+                                msgpack_bin(bytes([codec_headers["NULL"], 0x06])),
+                            ]
+                        ),
+                    ),
+                ]
+            ),
+        ),
+        (
+            "unknown_field_is_ignored",
+            msgpack_map(
+                [
+                    (99, msgpack_str("ignored")),
+                    (fields["FIELD_SIGNALLING"], msgpack_uint(signal_constants["STATUS_AVAILABLE"])),
+                ]
+            ),
+        ),
+    ]
+
+    malformed_packets = [
+        ("root_array", msgpack_array([])),
+        ("root_uint", msgpack_uint(1)),
+        ("trailing_byte_after_empty_map", msgpack_map([]) + b"\x00"),
+        (
+            "negative_signal",
+            msgpack_map([(fields["FIELD_SIGNALLING"], msgpack_int(-1))]),
+        ),
+        (
+            "string_signal",
+            msgpack_map([(fields["FIELD_SIGNALLING"], msgpack_str("ringing"))]),
+        ),
+        (
+            "frame_not_binary",
+            msgpack_map([(fields["FIELD_FRAMES"], msgpack_uint(1))]),
+        ),
+        (
+            "empty_frame_binary",
+            msgpack_map([(fields["FIELD_FRAMES"], msgpack_bin(b""))]),
+        ),
+        (
+            "unknown_codec_header",
+            msgpack_map([(fields["FIELD_FRAMES"], msgpack_bin(b"\x7f"))]),
+        ),
+        (
+            "frame_array_contains_non_binary",
+            msgpack_map(
+                [
+                    (
+                        fields["FIELD_FRAMES"],
+                        msgpack_array(
+                            [
+                                msgpack_bin(bytes([codec_headers["RAW"], 0x10])),
+                                msgpack_uint(1),
+                            ]
+                        ),
+                    )
+                ]
+            ),
+        ),
     ]
 
     lines = [
@@ -292,6 +395,12 @@ def main() -> None:
         "    packet_cases: &[",
     ]
     for name, payload in packets:
+        lines.append(f"        PacketFixture {{ name: {rust_string(name)}, hex: {rust_string(payload.hex())} }},")
+    lines += [
+        "    ],",
+        "    malformed_packet_cases: &[",
+    ]
+    for name, payload in malformed_packets:
         lines.append(f"        PacketFixture {{ name: {rust_string(name)}, hex: {rust_string(payload.hex())} }},")
     lines += [
         "    ],",
