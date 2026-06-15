@@ -146,6 +146,39 @@ fn opus_file_source_timed_mode_waits_between_frames() {
 }
 
 #[test]
+fn opus_file_source_looping_can_be_toggled_after_open() {
+    let path = temp_opus_path("loop-toggle");
+    let frame = AudioFrame::new(48_000, 2, vec![0.0; 960 * 2]).unwrap();
+
+    {
+        let mut sink = OpusFileSink::create(&path, CodecProfile::OpusAudioMax).unwrap();
+        sink.handle_frame(&frame).unwrap();
+        sink.finalize().unwrap();
+    }
+
+    let mut source = OpusFileSource::open(&path, 20, false).unwrap();
+    assert!(!source.looping());
+    source.set_looping(true);
+    assert!(source.looping());
+
+    source.start();
+    let mut produced = 0;
+    for _ in 0..100 {
+        if source.next_frame().unwrap().is_some() {
+            produced += 1;
+            if produced > 32 {
+                assert!(source.is_running());
+                let _ = fs::remove_file(path);
+                return;
+            }
+        }
+    }
+
+    let _ = fs::remove_file(path);
+    panic!("looping source did not continue producing frames");
+}
+
+#[test]
 fn source_player_obeys_sink_backpressure_before_pulling() {
     let frame = AudioFrame::new(48_000, 2, vec![0.0; 960 * 2]).unwrap();
     let source = FakeMediaSource::new(48_000, 2, vec![frame]);
@@ -175,6 +208,7 @@ fn source_player_starts_outputs_frames_and_stops() {
 
     player.start().unwrap();
     assert!(player.is_playing());
+    assert!(player.playing());
     assert!(player.sink().running);
 
     assert!(player.process_next().unwrap());
@@ -183,6 +217,7 @@ fn source_player_starts_outputs_frames_and_stops() {
 
     player.stop().unwrap();
     assert!(!player.is_playing());
+    assert!(!player.playing());
     assert!(!player.sink().running);
 }
 

@@ -431,6 +431,10 @@ impl OpusFileSource {
         self.timed
     }
 
+    pub fn looping(&self) -> bool {
+        self.looping
+    }
+
     pub fn set_timed(&mut self, timed: bool) {
         self.timed = timed;
         self.next_frame_at = if timed && self.running {
@@ -438,6 +442,10 @@ impl OpusFileSource {
         } else {
             None
         };
+    }
+
+    pub fn set_looping(&mut self, looping: bool) {
+        self.looping = looping;
     }
 }
 
@@ -650,6 +658,10 @@ where
         self.source.is_running()
     }
 
+    pub fn playing(&self) -> bool {
+        self.is_playing()
+    }
+
     pub fn set_finished_callback(&mut self, callback: impl FnMut() + Send + 'static) {
         self.finished_callback = Some(Box::new(callback));
     }
@@ -714,6 +726,22 @@ impl FilePlayer {
 
     pub fn start(&mut self) -> Result<(), MediaError> {
         self.inner.start()
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.inner.is_playing()
+    }
+
+    pub fn playing(&self) -> bool {
+        self.inner.playing()
+    }
+
+    pub fn looping(&self) -> bool {
+        self.inner.source().looping()
+    }
+
+    pub fn set_looping(&mut self, looping: bool) {
+        self.inner.source_mut().set_looping(looping);
     }
 
     pub fn stop(&mut self) -> Result<(), MediaError> {
