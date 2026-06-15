@@ -630,8 +630,17 @@ impl App {
                 }
                 if let Ok(packet) = LxstPacket::decode(&data) {
                     for signal in packet.signals {
+                        let was_outgoing_call = self.telephone.active_call_is_outgoing();
                         self.telephone.apply_signal(signal);
                         match signal {
+                            Signal::Code(SignalCode::Ringing) => {
+                                if was_outgoing_call && self.telephone.state() == CallState::Ringing
+                                {
+                                    self.send_signal(Signal::PreferredProfile(
+                                        self.telephone.active_profile(),
+                                    ));
+                                }
+                            }
                             Signal::Code(SignalCode::Established) => {
                                 if self.telephone.state() == CallState::Established {
                                     if let Some(link_id) = self.active_link {
@@ -2792,6 +2801,41 @@ mod tests {
         assert!(app.test_call_audio_running);
         assert_eq!(display_row(&app.hardware_ui, 0), "Call connected  ");
         assert_eq!(display_row(&app.hardware_ui, 1), "0s              ");
+    }
+
+    #[test]
+    fn outgoing_ringing_signal_sends_preferred_profile_like_upstream() {
+        let mut app = test_app();
+        let remote = [0x68; 16];
+        let link_id = link_id(0x77);
+        assert!(app
+            .telephone
+            .begin_outgoing_call_with_profile(remote, Some(CallProfile::HighQuality)));
+        app.active_link = Some(link_id.0);
+
+        app.handle_network_event(link_data_signal(Signal::Code(SignalCode::Ringing)));
+
+        assert_eq!(app.telephone.state(), CallState::Ringing);
+        assert_eq!(
+            app.test_sent_signals,
+            vec![(
+                link_id.0,
+                Signal::PreferredProfile(CallProfile::HighQuality)
+            )]
+        );
+    }
+
+    #[test]
+    fn incoming_ringing_signal_does_not_echo_profile() {
+        let mut app = test_app();
+        let link_id = link_id(0x77);
+        app.active_link = Some(link_id.0);
+        assert!(app.telephone.begin_incoming_call([0x69; 16]));
+
+        app.handle_network_event(link_data_signal(Signal::Code(SignalCode::Ringing)));
+
+        assert_eq!(app.telephone.state(), CallState::Ringing);
+        assert!(app.test_sent_signals.is_empty());
     }
 
     #[test]

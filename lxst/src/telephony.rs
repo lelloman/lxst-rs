@@ -190,6 +190,14 @@ impl Telephone {
         self.active_profile
     }
 
+    pub fn active_call_is_outgoing(&self) -> bool {
+        self.active_direction == Some(CallDirection::Outgoing)
+    }
+
+    pub fn active_call_is_incoming(&self) -> bool {
+        self.active_direction == Some(CallDirection::Incoming)
+    }
+
     pub fn low_latency_output(&self) -> bool {
         self.low_latency_output
     }
