@@ -369,10 +369,10 @@ impl PacketSender for LxstLinkSender {
     }
 }
 
-#[derive(Debug)]
 pub struct Packetizer<S> {
     sender: S,
     transmit_failure: bool,
+    failure_callback: Option<Box<dyn FnMut() + Send>>,
 }
 
 impl<S> Packetizer<S>
@@ -383,7 +383,27 @@ where
         Self {
             sender,
             transmit_failure: false,
+            failure_callback: None,
         }
+    }
+
+    pub fn with_failure_callback(
+        sender: S,
+        failure_callback: impl FnMut() + Send + 'static,
+    ) -> Self {
+        Self {
+            sender,
+            transmit_failure: false,
+            failure_callback: Some(Box::new(failure_callback)),
+        }
+    }
+
+    pub fn set_failure_callback(&mut self, failure_callback: impl FnMut() + Send + 'static) {
+        self.failure_callback = Some(Box::new(failure_callback));
+    }
+
+    pub fn clear_failure_callback(&mut self) {
+        self.failure_callback = None;
     }
 
     pub fn transmit_failure(&self) -> bool {
@@ -415,6 +435,9 @@ where
         let packet = LxstPacket::frame(EncodedFrame::new(frame.codec, frame.payload));
         if let Err(error) = self.sender.send_packet(&packet) {
             self.transmit_failure = true;
+            if let Some(callback) = &mut self.failure_callback {
+                callback();
+            }
             return Err(PipelineError::Network(error));
         }
         Ok(())

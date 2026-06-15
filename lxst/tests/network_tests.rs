@@ -1,7 +1,8 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lxst::network::{
@@ -78,6 +79,33 @@ fn packetizer_records_transmit_failure() {
     });
 
     assert!(result.is_err());
+    assert!(packetizer.transmit_failure());
+    assert!(!packetizer.can_receive());
+}
+
+#[test]
+fn packetizer_invokes_failure_callback_on_transmit_failure() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let callback_calls = Arc::clone(&calls);
+    let mut packetizer = Packetizer::with_failure_callback(
+        MockSender {
+            fail: true,
+            ..MockSender::default()
+        },
+        move || {
+            callback_calls.fetch_add(1, Ordering::SeqCst);
+        },
+    );
+
+    let result = packetizer.handle_frame(EncodedAudioFrame {
+        codec: CodecKind::Raw,
+        samplerate: 8_000,
+        channels: 1,
+        payload: vec![RawBitDepth::Float32 as u8],
+    });
+
+    assert!(matches!(result, Err(lxst::PipelineError::Network(_))));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(packetizer.transmit_failure());
     assert!(!packetizer.can_receive());
 }
