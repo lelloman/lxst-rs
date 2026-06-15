@@ -27,6 +27,8 @@ const OPUS_FILE_MAX_FRAMES: usize = 64;
 const OPUS_FILE_AUTOSTART_MIN: usize = 1;
 const OPUS_FILE_FINALIZE_TIMEOUT: Duration = Duration::from_secs(2);
 
+type FinishedCallback = Arc<Mutex<Box<dyn FnMut() + Send>>>;
+
 pub trait AudioFrameSink {
     fn start(&mut self) -> Result<(), MediaError> {
         Ok(())
@@ -655,7 +657,7 @@ where
 {
     source: S,
     sink: K,
-    finished_callback: Option<Box<dyn FnMut() + Send>>,
+    finished_callback: Option<FinishedCallback>,
     finished_notified: bool,
     frames_played: u64,
     samples_played: u64,
@@ -718,7 +720,7 @@ where
     }
 
     pub fn set_finished_callback(&mut self, callback: impl FnMut() + Send + 'static) {
-        self.finished_callback = Some(Box::new(callback));
+        self.finished_callback = Some(Arc::new(Mutex::new(Box::new(callback))));
     }
 
     pub fn clear_finished_callback(&mut self) {
@@ -736,8 +738,13 @@ where
     }
 
     pub fn stop(&mut self) -> Result<(), MediaError> {
+        let was_playing = self.source.is_running();
         self.source.stop();
-        self.sink.stop()
+        self.sink.stop()?;
+        if was_playing {
+            self.notify_finished();
+        }
+        Ok(())
     }
 
     pub fn process_next(&mut self) -> Result<bool, MediaError> {
@@ -763,8 +770,12 @@ where
             return;
         }
         self.finished_notified = true;
-        if let Some(callback) = &mut self.finished_callback {
-            callback();
+        if let Some(callback) = self.finished_callback.clone() {
+            thread::spawn(move || {
+                if let Ok(mut callback) = callback.lock() {
+                    callback();
+                }
+            });
         }
     }
 }

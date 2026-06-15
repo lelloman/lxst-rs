@@ -4,7 +4,7 @@ use std::sync::{
     Arc,
 };
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lxst::{
     AudioFrame, AudioFrameSink, AudioSource, MediaError, OpusFileSink, OpusFileSource,
@@ -246,9 +246,32 @@ fn source_player_calls_finished_callback_once_on_eof() {
     assert!(player.process_next().unwrap());
     assert!(!player.process_next().unwrap());
     assert!(!player.is_playing());
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    wait_for(|| calls.load(Ordering::SeqCst) == 1);
 
     assert!(!player.process_next().unwrap());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn source_player_calls_finished_callback_once_on_manual_stop() {
+    let frame = AudioFrame::new(48_000, 2, vec![0.0; 960 * 2]).unwrap();
+    let source = FakeMediaSource::new(48_000, 2, vec![frame]);
+    let sink = FakeFrameSink {
+        can_receive: true,
+        ..FakeFrameSink::default()
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let callback_calls = Arc::clone(&calls);
+    let mut player = SourcePlayer::new(source, sink);
+    player.set_finished_callback(move || {
+        callback_calls.fetch_add(1, Ordering::SeqCst);
+    });
+
+    player.start().unwrap();
+    player.stop().unwrap();
+    wait_for(|| calls.load(Ordering::SeqCst) == 1);
+
+    player.stop().unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
@@ -404,4 +427,15 @@ fn temp_opus_path(name: &str) -> std::path::PathBuf {
             .unwrap()
             .as_nanos()
     ))
+}
+
+fn wait_for(mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        if condition() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(condition());
 }
