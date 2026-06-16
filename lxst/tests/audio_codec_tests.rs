@@ -98,6 +98,19 @@ fn raw_codec_rejects_truncated_f16_payloads() {
 }
 
 #[test]
+fn raw_codec_rejects_empty_and_invalid_headers() {
+    let mut codec = RawCodec::new(RawBitDepth::Float32);
+    assert!(matches!(
+        codec.decode(&[], 48_000),
+        Err(CodecError::EmptyFrame)
+    ));
+    assert!(matches!(
+        codec.decode(&[0xff], 48_000),
+        Err(CodecError::RawHeader(_))
+    ));
+}
+
+#[test]
 fn raw_codec_rejects_float128_with_explicit_policy() {
     let frame = AudioFrame::new(48_000, 1, vec![0.25]).unwrap();
     let mut encoder = RawCodec::new(RawBitDepth::Float128);
@@ -260,6 +273,43 @@ fn opus_codec_rejects_invalid_frame_duration() {
 }
 
 #[test]
+fn opus_codec_rejects_invalid_decode_samplerate() {
+    let frame = AudioFrame::new(8_000, 1, vec![0.0; 160]).unwrap();
+    let mut encoder = OpusCodec::new(CodecProfile::OpusVoiceLow);
+    let encoded = encoder.encode(&frame).unwrap();
+    let mut decoder = OpusCodec::new(CodecProfile::OpusVoiceLow);
+
+    assert!(matches!(
+        decoder.decode(&encoded, 11_025),
+        Err(CodecError::InvalidOpusSamplerate(11_025))
+    ));
+}
+
+#[test]
+fn opus_round_trip_shape_and_sample_error_are_bounded() {
+    let samples: Vec<f32> = (0..160)
+        .map(|n| ((n as f32 / 8_000.0) * 220.0 * std::f32::consts::TAU).sin() * 0.2)
+        .collect();
+    let frame = AudioFrame::new(8_000, 1, samples).unwrap();
+    let mut codec = OpusCodec::new(CodecProfile::OpusVoiceLow);
+
+    let encoded = codec.encode(&frame).unwrap();
+    let decoded = codec.decode(&encoded, 8_000).unwrap();
+
+    assert_eq!(decoded.samplerate(), 8_000);
+    assert_eq!(decoded.channels(), 1);
+    assert_eq!(decoded.frame_count(), frame.frame_count());
+    let mean_abs_error = decoded
+        .samples()
+        .iter()
+        .zip(frame.samples())
+        .map(|(left, right)| (left - right).abs())
+        .sum::<f32>()
+        / frame.samples().len() as f32;
+    assert!(mean_abs_error < 0.35, "mean_abs_error={mean_abs_error}");
+}
+
+#[test]
 fn opus_profile_helpers_match_python_tables() {
     assert_eq!(
         OpusCodec::profile_channels(CodecProfile::OpusVoiceMax).unwrap(),
@@ -398,6 +448,19 @@ fn codec2_decode_uses_embedded_mode_header() {
 
     let decoded = decoder.decode(&encoded, 8_000).unwrap();
     assert_eq!(decoded.frame_count(), 160);
+}
+
+#[test]
+fn codec2_rejects_invalid_mode_and_truncated_payloads() {
+    let mut decoder = Codec2Codec::new(CodecProfile::Codec2_3200);
+    assert!(matches!(
+        decoder.decode(&[0x7f, 0x00], 8_000),
+        Err(CodecError::InvalidCodec2ModeHeader(0x7f))
+    ));
+    assert!(matches!(
+        decoder.decode(&[0x06, 0x00], 8_000),
+        Err(CodecError::InvalidPayloadLength(1))
+    ));
 }
 
 #[test]

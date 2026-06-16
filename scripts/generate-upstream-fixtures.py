@@ -139,6 +139,10 @@ def msgpack_str(value: str) -> bytes:
     raise ValueError("fixture string too large")
 
 
+def msgpack_nil() -> bytes:
+    return b"\xc0"
+
+
 def msgpack_bin(value: bytes) -> bytes:
     if len(value) <= 0xFF:
         return bytes([0xC4, len(value)]) + value
@@ -290,6 +294,26 @@ def main() -> None:
             msgpack_map([(fields["FIELD_FRAMES"], msgpack_bin(bytes([codec_headers["OPUS"], 0xAA, 0xBB])))]),
         ),
         (
+            "empty_frames_field",
+            msgpack_map([(fields["FIELD_FRAMES"], msgpack_array([]))]),
+        ),
+        (
+            "multiple_opus_frames",
+            msgpack_map(
+                [
+                    (
+                        fields["FIELD_FRAMES"],
+                        msgpack_array(
+                            [
+                                msgpack_bin(bytes([codec_headers["OPUS"], 0xAA])),
+                                msgpack_bin(bytes([codec_headers["OPUS"], 0xBB, 0xCC])),
+                            ]
+                        ),
+                    )
+                ]
+            ),
+        ),
+        (
             "scalar_ringing_signal",
             msgpack_map([(fields["FIELD_SIGNALLING"], msgpack_uint(signal_constants["STATUS_RINGING"]))]),
         ),
@@ -322,6 +346,15 @@ def main() -> None:
                             ]
                         ),
                     )
+                ]
+            ),
+        ),
+        (
+            "mixed_signalling_and_single_frame",
+            msgpack_map(
+                [
+                    (fields["FIELD_SIGNALLING"], msgpack_uint(signal_constants["STATUS_CONNECTING"])),
+                    (fields["FIELD_FRAMES"], msgpack_bin(bytes([codec_headers["RAW"], 0x30]))),
                 ]
             ),
         ),
@@ -367,11 +400,24 @@ def main() -> None:
                 ]
             ),
         ),
+        (
+            "duplicate_fields_extend_in_order",
+            msgpack_map(
+                [
+                    (fields["FIELD_SIGNALLING"], msgpack_uint(signal_constants["STATUS_AVAILABLE"])),
+                    (fields["FIELD_SIGNALLING"], msgpack_uint(signal_constants["STATUS_RINGING"])),
+                    (fields["FIELD_FRAMES"], msgpack_bin(bytes([codec_headers["RAW"], 0x40]))),
+                    (fields["FIELD_FRAMES"], msgpack_bin(bytes([codec_headers["OPUS"], 0x50]))),
+                ]
+            ),
+        ),
     ]
 
     malformed_packets = [
         ("root_array", msgpack_array([])),
         ("root_uint", msgpack_uint(1)),
+        ("root_nil", msgpack_nil()),
+        ("root_string", msgpack_str("packet")),
         ("trailing_byte_after_empty_map", msgpack_map([]) + b"\x00"),
         (
             "negative_signal",

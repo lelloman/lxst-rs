@@ -170,8 +170,8 @@ fn generated_fixture_is_from_current_upstream_shape() {
             (3200, 6),
         ]
     );
-    assert!(fixture.packet_cases.len() >= 7);
-    assert!(fixture.malformed_packet_cases.len() >= 9);
+    assert!(fixture.packet_cases.len() >= 11);
+    assert!(fixture.malformed_packet_cases.len() >= 11);
 }
 
 #[test]
@@ -322,6 +322,20 @@ fn decodes_generated_python_packet_fixtures() {
                 );
                 assert_eq!(decoded.encode().unwrap(), decode_hex(packet.hex));
             }
+            "empty_frames_field" => {
+                assert!(decoded.is_empty());
+            }
+            "multiple_opus_frames" => {
+                assert!(decoded.signals.is_empty());
+                assert_eq!(
+                    decoded.frames,
+                    vec![
+                        EncodedFrame::new(CodecKind::Opus, vec![0xaa]),
+                        EncodedFrame::new(CodecKind::Opus, vec![0xbb, 0xcc]),
+                    ]
+                );
+                assert_eq!(decoded.encode().unwrap(), decode_hex(packet.hex));
+            }
             "scalar_ringing_signal" => {
                 assert_eq!(decoded.signals, vec![Signal::Code(SignalCode::Ringing)]);
                 assert!(decoded.frames.is_empty());
@@ -347,6 +361,13 @@ fn decodes_generated_python_packet_fixtures() {
                     ]
                 );
                 assert_eq!(decoded.encode().unwrap(), decode_hex(packet.hex));
+            }
+            "mixed_signalling_and_single_frame" => {
+                assert_eq!(decoded.signals, vec![Signal::Code(SignalCode::Connecting)]);
+                assert_eq!(
+                    decoded.frames,
+                    vec![EncodedFrame::new(CodecKind::Raw, vec![0x30])]
+                );
             }
             "empty_packet" => {
                 assert!(decoded.is_empty());
@@ -376,6 +397,22 @@ fn decodes_generated_python_packet_fixtures() {
             "unknown_field_is_ignored" => {
                 assert_eq!(decoded.signals, vec![Signal::Code(SignalCode::Available)]);
                 assert!(decoded.frames.is_empty());
+            }
+            "duplicate_fields_extend_in_order" => {
+                assert_eq!(
+                    decoded.signals,
+                    vec![
+                        Signal::Code(SignalCode::Available),
+                        Signal::Code(SignalCode::Ringing),
+                    ]
+                );
+                assert_eq!(
+                    decoded.frames,
+                    vec![
+                        EncodedFrame::new(CodecKind::Raw, vec![0x40]),
+                        EncodedFrame::new(CodecKind::Opus, vec![0x50]),
+                    ]
+                );
             }
             other => panic!("unhandled upstream packet fixture {other}"),
         }

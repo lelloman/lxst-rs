@@ -359,6 +359,9 @@ impl Codec2Codec {
         let codec = self.system_codec(mode)?;
         let samples_per_frame = codec.samples_per_frame();
         let bytes_per_frame = codec.bits_per_frame().div_ceil(8);
+        if !payload.len().is_multiple_of(bytes_per_frame) {
+            return Err(CodecError::InvalidPayloadLength(payload.len()));
+        }
         let frame_count = payload.len() / bytes_per_frame;
         let mut decoded = Vec::with_capacity(frame_count * samples_per_frame);
         for encoded_frame in payload.chunks_exact(bytes_per_frame) {
@@ -420,6 +423,9 @@ impl AudioCodec for Codec2Codec {
         let codec = self.codec(mode);
         let samples_per_frame = codec.samples_per_frame();
         let bytes_per_frame = codec.bits_per_frame().div_ceil(8);
+        if !payload.len().is_multiple_of(bytes_per_frame) {
+            return Err(CodecError::InvalidPayloadLength(payload.len()));
+        }
         let frame_count = payload.len() / bytes_per_frame;
         let mut decoded = Vec::with_capacity(frame_count * samples_per_frame);
         for encoded_frame in payload.chunks_exact(bytes_per_frame) {
