@@ -111,6 +111,33 @@ fn packetizer_invokes_failure_callback_on_transmit_failure() {
 }
 
 #[test]
+fn packetizer_failure_callback_can_drive_call_teardown() {
+    let teardown_calls = Arc::new(AtomicUsize::new(0));
+    let callback_calls = Arc::clone(&teardown_calls);
+    let mut packetizer = Packetizer::with_failure_callback(
+        MockSender {
+            fail: true,
+            ..MockSender::default()
+        },
+        move || {
+            callback_calls.fetch_add(1, Ordering::SeqCst);
+        },
+    );
+
+    let result = packetizer.handle_frame(EncodedAudioFrame {
+        codec: CodecKind::Raw,
+        samplerate: 8_000,
+        channels: 1,
+        payload: vec![RawBitDepth::Float32 as u8],
+    });
+
+    assert!(matches!(result, Err(lxst::PipelineError::Network(_))));
+    assert_eq!(teardown_calls.load(Ordering::SeqCst), 1);
+    assert!(packetizer.transmit_failure());
+    assert!(!packetizer.can_receive());
+}
+
+#[test]
 fn signalling_packet_round_trips_call_state() {
     let packet = LxstPacket::signalling(Signal::Code(SignalCode::Established));
     let decoded = LxstPacket::decode(&packet.encode().unwrap()).unwrap();

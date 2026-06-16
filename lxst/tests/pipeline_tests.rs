@@ -10,7 +10,7 @@ use lxst::{
     EncodedMixerSink, Loopback, Mixer, MixerInputSink, MixerRuntime, Pipeline, PipelineError,
     PipelineRunner, RawBitDepth, RawCodec, ToneSource,
 };
-use lxst_core::{CodecKind, CodecProfile};
+use lxst_core::{CodecKind, CodecProfile, LxstPacket};
 
 #[test]
 fn buffered_source_obeys_running_state() {
@@ -305,6 +305,122 @@ fn pipeline_can_feed_shared_mixer_runtime() {
 }
 
 #[test]
+fn tone_to_mixer_to_encoded_loopback_round_trip() {
+    let loopback =
+        Loopback::new(Box::new(RawCodec::new(RawBitDepth::Float32)), 8_000, 1, 4).unwrap();
+    let loopback_sink = loopback.clone();
+    let mut loopback_source = loopback.clone();
+    let sink = EncodedMixerSink::new(Box::new(RawCodec::new(RawBitDepth::Float32)), loopback_sink);
+    let mut runtime = MixerRuntime::start(Mixer::default(), sink, Duration::from_millis(1));
+    let mixer = runtime.mixer();
+
+    let mut source = ToneSource::with_frame_ms(440.0, 8_000, 1, 0.25, 20);
+    source.start();
+    let frame = AudioSource::next_frame(&mut source).unwrap().unwrap();
+    mixer.lock().unwrap().push(1, frame);
+
+    wait_for(|| loopback.queued_frames() == 1);
+    runtime.stop().unwrap();
+
+    loopback_source.start();
+    let decoded = loopback_source.next_frame().unwrap().unwrap();
+    assert_eq!(decoded.samplerate(), 8_000);
+    assert_eq!(decoded.channels(), 1);
+    assert_eq!(decoded.frame_count(), 160);
+    assert!(decoded.samples().iter().any(|sample| sample.abs() > 0.0));
+}
+
+#[test]
+fn link_source_to_mixer_respects_output_backpressure() {
+    let mixer = Arc::new(Mutex::new(Mixer::default()));
+    let accepting = Arc::new(AtomicBool::new(false));
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let sink = GatedFrameSink {
+        accepting: Arc::clone(&accepting),
+        frames: Arc::clone(&frames),
+    };
+    let mut runtime =
+        MixerRuntime::start_shared(Arc::clone(&mixer), sink, Duration::from_millis(1));
+
+    let mut raw = RawCodec::new(RawBitDepth::Float32);
+    let payload = raw
+        .encode(&lxst::AudioFrame::new(8_000, 1, vec![0.25]).unwrap())
+        .unwrap();
+    let packet = LxstPacket::frame(lxst_core::EncodedFrame::new(CodecKind::Raw, payload));
+    let mut source = lxst::LinkSource::with_null_codec(8_000, 1);
+    source.handle_packet(packet).unwrap();
+    let mut pipeline = Pipeline::new(
+        Box::new(source),
+        Box::new(RawCodec::new(RawBitDepth::Float32)),
+        Box::new(MixerInputSink::new(
+            Arc::clone(&mixer),
+            9,
+            Box::new(RawCodec::new(RawBitDepth::Float32)),
+        )),
+    );
+
+    pipeline.start();
+    assert!(pipeline.process_next().unwrap());
+    thread::sleep(Duration::from_millis(20));
+    assert!(frames.lock().unwrap().is_empty());
+
+    accepting.store(true, Ordering::SeqCst);
+    wait_for(|| frames.lock().unwrap().len() == 1);
+    runtime.stop().unwrap();
+
+    let frames = frames.lock().unwrap();
+    assert_eq!(frames[0].samples(), &[0.25]);
+}
+
+#[test]
+fn mixer_graph_accepts_multiple_simultaneous_input_sources() {
+    let mixer = Arc::new(Mutex::new(Mixer::default()));
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let sink = CollectingFrameSink {
+        frames: Arc::clone(&frames),
+    };
+    let mut runtime =
+        MixerRuntime::start_shared(Arc::clone(&mixer), sink, Duration::from_millis(1));
+
+    let mut left = BufferedSource::new(8_000, 1).unwrap();
+    left.push_frame(lxst::AudioFrame::new(8_000, 1, vec![0.25]).unwrap())
+        .unwrap();
+    let mut right = BufferedSource::new(8_000, 1).unwrap();
+    right
+        .push_frame(lxst::AudioFrame::new(8_000, 1, vec![0.5]).unwrap())
+        .unwrap();
+
+    let mut left_pipeline = Pipeline::new(
+        Box::new(left),
+        Box::new(RawCodec::new(RawBitDepth::Float32)),
+        Box::new(MixerInputSink::new(
+            Arc::clone(&mixer),
+            1,
+            Box::new(RawCodec::new(RawBitDepth::Float32)),
+        )),
+    );
+    let mut right_pipeline = Pipeline::new(
+        Box::new(right),
+        Box::new(RawCodec::new(RawBitDepth::Float32)),
+        Box::new(MixerInputSink::new(
+            Arc::clone(&mixer),
+            2,
+            Box::new(RawCodec::new(RawBitDepth::Float32)),
+        )),
+    );
+
+    left_pipeline.start();
+    right_pipeline.start();
+    assert!(left_pipeline.process_next().unwrap());
+    assert!(right_pipeline.process_next().unwrap());
+    wait_for(|| frames.lock().unwrap().len() == 1);
+    runtime.stop().unwrap();
+
+    let frames = frames.lock().unwrap();
+    assert_eq!(frames[0].samples(), &[0.75]);
+}
+
+#[test]
 fn encoded_mixer_sink_delegates_backpressure() {
     let accepting = Arc::new(AtomicBool::new(false));
     let sink = GatedSink {
@@ -366,6 +482,27 @@ struct CollectingFrameSink {
 
 impl lxst::MixerSink for CollectingFrameSink {
     fn handle_frame(&mut self, frame: lxst::AudioFrame) -> Result<(), lxst::AudioError> {
+        self.frames.lock().unwrap().push(frame);
+        Ok(())
+    }
+}
+
+struct GatedFrameSink {
+    accepting: Arc<AtomicBool>,
+    frames: Arc<Mutex<Vec<lxst::AudioFrame>>>,
+}
+
+impl lxst::MixerSink for GatedFrameSink {
+    fn can_receive(&self) -> bool {
+        self.accepting.load(Ordering::SeqCst)
+    }
+
+    fn handle_frame(&mut self, frame: lxst::AudioFrame) -> Result<(), lxst::AudioError> {
+        if !self.can_receive() {
+            return Err(lxst::AudioError::Stream(
+                "sink is backpressured".to_string(),
+            ));
+        }
         self.frames.lock().unwrap().push(frame);
         Ok(())
     }
