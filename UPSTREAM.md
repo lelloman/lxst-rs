@@ -14,7 +14,7 @@ The current upstream reference baseline is:
 - Commit date: `2025-12-28 01:00:21 +0100`
 - Subject: `Updated readme`
 
-The first Rust porting pass implemented repository metadata/CI/licensing, LXST packet wire helpers, corrected telephony profile/signalling constants, Raw codec support, deterministic audio/DSP primitives, Reticulum link helper APIs, an event-driven telephony state skeleton, and an `rnphone` CLI scaffold. Opus, Codec2, CPAL live audio, and full live-call orchestration remain to be ported.
+The Rust port now includes repository metadata/CI/licensing, LXST packet wire helpers, telephony profile/signalling constants, Raw/Opus/Codec2 codec support, deterministic audio/DSP primitives, CPAL audio I/O, Ogg Opus media, Reticulum link helper APIs, an event-driven telephony state machine, and an `rnphone` CLI with live call/audio/signalling wiring plus optional Raspberry Pi hardware hooks. Remaining upstream parity work is tracked through validation artifacts and future upstream-delta reviews rather than known missing core protocol pieces.
 
 When integrating future upstream changes, compare this baseline against the new
 LXST upstream commit, review protocol constants, frame and signalling formats,

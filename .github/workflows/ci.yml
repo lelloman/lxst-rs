@@ -81,3 +81,77 @@ jobs:
 
       - name: Run Clippy
         run: bash scripts/lint-host.sh
+
+
+  examples-check:
+    name: LXST Examples
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout lxst-rs
+        uses: actions/checkout@v6
+        with:
+          path: lxst-rs
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.93.1
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lxst-rs -> target
+
+      - name: Check lxst examples
+        run: cargo check -p lxst --examples
+
+  default-feature-matrix:
+    name: Default Features (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Checkout lxst-rs
+        uses: actions/checkout@v6
+        with:
+          path: lxst-rs
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.93.1
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lxst-rs -> target
+
+      - name: Check workspace default features
+        run: cargo check --workspace
+
+  gpio-rpi-check:
+    name: Raspberry Pi GPIO Feature
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout lxst-rs
+        uses: actions/checkout@v6
+        with:
+          path: lxst-rs
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.93.1
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lxst-rs -> target
+
+      - name: Check rnphone gpio-rpi feature
+        run: cargo check -p rnphone --features gpio-rpi
