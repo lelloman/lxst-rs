@@ -46,7 +46,8 @@ pub use lxst_core::{
     PacketError, RawBitDepth, RawFrameHeader, Signal, SignalCode,
 };
 pub use telephony::{
-    CallEvent, CallState, CallerPolicy, Telephone, TelephoneConfig, MIN_ANNOUNCE_INTERVAL,
+    CallDirection, CallEvent, CallSessionInfo, CallState, CallerPolicy, Telephone, TelephoneConfig,
+    MIN_ANNOUNCE_INTERVAL,
 };
 
 #[derive(Debug, thiserror::Error)]

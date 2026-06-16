@@ -159,6 +159,8 @@ struct App {
     hardware_events: Option<mpsc::Receiver<KeypadEvent>>,
     hardware_poller: Option<MatrixKeypadPoller>,
     #[cfg(test)]
+    test_output: Vec<String>,
+    #[cfg(test)]
     test_sent_signals: Vec<([u8; 16], Signal)>,
     #[cfg(test)]
     test_started_audio: Vec<[u8; 16]>,
@@ -228,6 +230,8 @@ impl App {
             hardware_last_event,
             hardware_events,
             hardware_poller,
+            #[cfg(test)]
+            test_output: Vec::new(),
             #[cfg(test)]
             test_sent_signals: Vec::new(),
             #[cfg(test)]
@@ -306,9 +310,9 @@ impl App {
                 },
                 "answer" => {
                     if self.answer_current() {
-                        println!("Call answered");
+                        self.call_flow_message("Call answered");
                     } else {
-                        println!("No incoming call to answer");
+                        self.call_flow_message("No incoming call to answer");
                     }
                 }
                 "hangup" => self.hangup_current(),
@@ -319,7 +323,7 @@ impl App {
                 }
                 other => match self.config.resolve_dial_target(other) {
                     Some(target) => {
-                        println!("Calling {}", target.label);
+                        self.call_flow_message(format!("Calling {}", target.label));
                         self.dial_hash(&endpoint, target.identity_hash)?;
                     }
                     None => println!("Unknown command: {other}"),
@@ -364,9 +368,9 @@ impl App {
             HardwareAction::None => Ok(()),
             HardwareAction::Answer => {
                 if self.answer_current() {
-                    println!("Call answered");
+                    self.call_flow_message("Call answered");
                 } else {
-                    println!("No incoming call to answer");
+                    self.call_flow_message("No incoming call to answer");
                 }
                 Ok(())
             }
@@ -375,6 +379,18 @@ impl App {
                 Ok(())
             }
             HardwareAction::Dial(identity_hash) => self.dial_hash(endpoint, identity_hash),
+        }
+    }
+
+    fn call_flow_message(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        #[cfg(test)]
+        {
+            self.test_output.push(message);
+        }
+        #[cfg(not(test))]
+        {
+            println!("{message}");
         }
     }
 
@@ -411,7 +427,7 @@ impl App {
         identity_hash: [u8; 16],
     ) -> Result<(), String> {
         if self.telephone.is_busy() {
-            println!("Telephone is busy");
+            self.call_flow_message("Telephone is busy");
             return Ok(());
         }
 
@@ -428,7 +444,7 @@ impl App {
         )
         .map_err(|e| e.to_string())?
         {
-            println!("Path request timed out");
+            self.call_flow_message("Path request timed out");
             self.hardware_ui.show_path_timeout();
             self.became_available();
             return Ok(());
@@ -441,15 +457,15 @@ impl App {
         if self.telephone.begin_outgoing_call(identity_hash) {
             self.active_link = Some(link_id);
             self.last_dialed = Some(identity_hash);
-            println!(
+            self.call_flow_message(format!(
                 "Calling {} on link {}...",
                 pretty_hash(&identity_hash),
                 pretty_hash(&link_id)
-            );
+            ));
             self.hardware_ui.show_calling(None);
         } else {
             let _ = node.teardown_link(link_id);
-            println!("Telephone is busy");
+            self.call_flow_message("Telephone is busy");
         }
         Ok(())
     }
@@ -545,7 +561,7 @@ impl App {
         }
         self.telephone.hangup();
         self.became_available();
-        println!("Call ended");
+        self.call_flow_message("Call ended");
     }
 
     fn poll_network_events(&mut self) {
@@ -574,20 +590,33 @@ impl App {
                 ..
             } => {
                 if is_initiator {
+                    let pending_outgoing = self.telephone.active_call_is_outgoing()
+                        && matches!(
+                            self.telephone.state(),
+                            CallState::Calling | CallState::Ringing | CallState::Connecting
+                        );
+                    let owns_link = self.active_link.is_none_or(|active| active == link_id.0);
+                    if !pending_outgoing || !owns_link {
+                        self.teardown_link(link_id.0);
+                        return;
+                    }
+
                     self.active_link = Some(link_id.0);
                     let _ = self.telephone.establish();
                     self.send_signal(Signal::Code(SignalCode::Established));
                     self.start_call_audio(link_id.0);
                     self.mark_call_connected_at(Instant::now());
-                    println!("Link {link_id} established to {dest_hash}");
+                    self.call_flow_message(format!("Link {link_id} established to {dest_hash}"));
+                } else if self.active_link == Some(link_id.0) {
+                    // Duplicate inbound establishment for the pre-identification link.
                 } else if self.telephone.is_busy() || self.active_link.is_some() {
                     self.send_signal_to(link_id.0, Signal::Code(SignalCode::Busy));
                     self.teardown_link(link_id.0);
-                    println!("Incoming link {link_id} rejected as busy");
+                    self.call_flow_message(format!("Incoming link {link_id} rejected as busy"));
                 } else {
                     self.active_link = Some(link_id.0);
                     self.send_signal_to(link_id.0, Signal::Code(SignalCode::Available));
-                    println!("Incoming link {link_id} from {dest_hash}");
+                    self.call_flow_message(format!("Incoming link {link_id} from {dest_hash}"));
                 }
             }
             TelephonyNetworkEvent::LinkClosed { link_id, .. } => {
@@ -600,7 +629,7 @@ impl App {
                         self.telephone.hangup();
                     }
                     self.became_available();
-                    println!("Link {link_id} closed");
+                    self.call_flow_message(format!("Link {link_id} closed"));
                 }
             }
             TelephonyNetworkEvent::RemoteIdentified {
@@ -608,29 +637,41 @@ impl App {
                 link_id,
                 ..
             } => {
-                if self.telephone.state() == CallState::Available {
-                    self.active_link = Some(link_id.0);
-                    if self.telephone.begin_incoming_call(identity_hash.0) {
-                        self.send_signal(Signal::Code(SignalCode::Ringing));
-                        self.start_ringer();
-                        self.hardware_ui
-                            .show_incoming_call(identity_hash.0, &self.config);
-                        println!("Incoming call from {identity_hash}");
-                    } else {
-                        self.send_signal(Signal::Code(SignalCode::Busy));
-                        self.teardown_link(link_id.0);
-                        self.active_link = None;
-                        println!("Rejected incoming call from {identity_hash}");
-                    }
+                if self.active_link != Some(link_id.0) {
+                    self.send_signal_to(link_id.0, Signal::Code(SignalCode::Busy));
+                    self.teardown_link(link_id.0);
+                    self.call_flow_message(format!("Rejected incoming call from {identity_hash}"));
+                    return;
+                }
+                if self.telephone.state() != CallState::Available {
+                    return;
+                }
+
+                if self.telephone.begin_incoming_call(identity_hash.0) {
+                    self.send_signal(Signal::Code(SignalCode::Ringing));
+                    self.start_ringer();
+                    self.hardware_ui
+                        .show_incoming_call(identity_hash.0, &self.config);
+                    self.call_flow_message(format!("Incoming call from {identity_hash}"));
+                } else {
+                    self.send_signal(Signal::Code(SignalCode::Busy));
+                    self.teardown_link(link_id.0);
+                    self.active_link = None;
+                    self.call_flow_message(format!("Rejected incoming call from {identity_hash}"));
                 }
             }
-            TelephonyNetworkEvent::LinkData { data, .. } => {
+            TelephonyNetworkEvent::LinkData { link_id, data, .. } => {
+                if self.active_link != Some(link_id.0) {
+                    return;
+                }
                 if let Some(audio) = &self.active_audio {
                     let _ = audio.handle_link_data(&data);
                 }
                 if let Ok(packet) = LxstPacket::decode(&data) {
                     for signal in packet.signals {
                         let was_outgoing_call = self.telephone.active_call_is_outgoing();
+                        let previous_profile = self.telephone.active_profile();
+                        let call_audio_was_running = self.call_audio_running();
                         self.telephone.apply_signal(signal);
                         match signal {
                             Signal::Code(SignalCode::Ringing) => {
@@ -658,6 +699,14 @@ impl App {
                                         self.teardown_link(link_id);
                                     }
                                     self.became_available();
+                                }
+                            }
+                            Signal::PreferredProfile(_) => {
+                                if call_audio_was_running
+                                    && self.telephone.state() == CallState::Established
+                                    && self.telephone.active_profile() != previous_profile
+                                {
+                                    self.restart_call_audio();
                                 }
                             }
                             _ => {
@@ -757,6 +806,24 @@ impl App {
         if let Some(mut audio) = self.active_audio.take() {
             audio.stop();
         }
+    }
+
+    #[cfg(test)]
+    fn call_audio_running(&self) -> bool {
+        self.test_call_audio_running
+    }
+
+    #[cfg(not(test))]
+    fn call_audio_running(&self) -> bool {
+        self.active_audio.is_some()
+    }
+
+    fn restart_call_audio(&mut self) {
+        let Some(link_id) = self.active_link else {
+            return;
+        };
+        self.stop_call_audio();
+        self.start_call_audio(link_id);
     }
 
     #[cfg(test)]
@@ -2438,6 +2505,7 @@ mod tests {
             hardware_last_event,
             hardware_events: None,
             hardware_poller: None,
+            test_output: Vec::new(),
             test_sent_signals: Vec::new(),
             test_started_audio: Vec::new(),
             test_call_audio_running: false,
@@ -2526,8 +2594,12 @@ mod tests {
     }
 
     fn link_data_signal(signal: Signal) -> TelephonyNetworkEvent {
+        link_data_signal_on(link_id(0x77), signal)
+    }
+
+    fn link_data_signal_on(link_id: rns_net::LinkId, signal: Signal) -> TelephonyNetworkEvent {
         TelephonyNetworkEvent::LinkData {
-            link_id: link_id(0x77),
+            link_id,
             context: 0,
             data: LxstPacket::signalling(signal).encode().unwrap(),
         }
@@ -2554,6 +2626,7 @@ mod tests {
         );
         assert_eq!(app.test_started_audio, vec![link_id.0]);
         assert!(app.test_call_audio_running);
+        assert_eq!(app.test_output, vec!["Call answered"]);
     }
 
     #[test]
@@ -2695,23 +2768,23 @@ mod tests {
     }
 
     #[test]
-    fn incoming_remote_identity_rings_and_tracks_link() {
+    fn remote_identity_without_preaccepted_link_is_rejected() {
         let mut app = test_app_with_config(display_config());
         let link_id = link_id(0x11);
         let caller = identity_hash(0x22);
 
         app.handle_network_event(remote_identified_event(link_id, caller));
 
-        assert_eq!(app.telephone.state(), CallState::Ringing);
-        assert_eq!(app.active_link, Some(link_id.0));
+        assert_eq!(app.telephone.state(), CallState::Available);
+        assert_eq!(app.active_link, None);
         assert_eq!(
             app.test_sent_signals,
-            vec![(link_id.0, Signal::Code(SignalCode::Ringing))]
+            vec![(link_id.0, Signal::Code(SignalCode::Busy))]
         );
-        assert!(app.test_ringer_running);
-        assert_eq!(app.test_ringer_starts, 1);
-        assert_eq!(display_row(&app.hardware_ui, 0), "2222222222222222");
-        assert_eq!(display_row(&app.hardware_ui, 1), "2222222222222222");
+        assert_eq!(app.test_torn_down_links, vec![link_id.0]);
+        assert_eq!(app.test_ringer_starts, 0);
+        assert_eq!(display_row(&app.hardware_ui, 0), "                ");
+        assert_eq!(display_row(&app.hardware_ui, 1), "                ");
     }
 
     #[test]
@@ -2738,6 +2811,13 @@ mod tests {
                 (link_id.0, Signal::Code(SignalCode::Ringing)),
             ]
         );
+        assert_eq!(
+            app.test_output,
+            vec![
+                format!("Incoming link {link_id} from {}", dest_hash(0xD0)),
+                format!("Incoming call from {caller}"),
+            ]
+        );
     }
 
     #[test]
@@ -2760,6 +2840,58 @@ mod tests {
     }
 
     #[test]
+    fn mismatched_remote_identity_is_busy_and_does_not_steal_link() {
+        let mut app = test_app();
+        let active_link = link_id(0x40);
+        let stale_link = link_id(0x41);
+        app.handle_network_event(established_link_event(active_link, false));
+
+        app.handle_network_event(remote_identified_event(stale_link, identity_hash(0x42)));
+
+        assert_eq!(app.active_link, Some(active_link.0));
+        assert_eq!(app.telephone.state(), CallState::Available);
+        assert_eq!(
+            app.test_sent_signals,
+            vec![
+                (active_link.0, Signal::Code(SignalCode::Available)),
+                (stale_link.0, Signal::Code(SignalCode::Busy)),
+            ]
+        );
+        assert_eq!(app.test_torn_down_links, vec![stale_link.0]);
+    }
+
+    #[test]
+    fn initiator_link_established_without_pending_outgoing_call_is_torn_down() {
+        let mut app = test_app();
+        let link_id = link_id(0x43);
+
+        app.handle_network_event(established_link_event(link_id, true));
+
+        assert_eq!(app.active_link, None);
+        assert_eq!(app.telephone.state(), CallState::Available);
+        assert!(app.test_sent_signals.is_empty());
+        assert_eq!(app.test_torn_down_links, vec![link_id.0]);
+        assert!(app.test_started_audio.is_empty());
+    }
+
+    #[test]
+    fn initiator_link_established_for_wrong_pending_link_is_torn_down() {
+        let mut app = test_app();
+        let expected_link = link_id(0x44);
+        let stale_link = link_id(0x45);
+        assert!(app.telephone.begin_outgoing_call([0x46; 16]));
+        app.active_link = Some(expected_link.0);
+
+        app.handle_network_event(established_link_event(stale_link, true));
+
+        assert_eq!(app.active_link, Some(expected_link.0));
+        assert_eq!(app.telephone.state(), CallState::Calling);
+        assert!(app.test_sent_signals.is_empty());
+        assert_eq!(app.test_torn_down_links, vec![stale_link.0]);
+        assert!(app.test_started_audio.is_empty());
+    }
+
+    #[test]
     fn blocked_incoming_identity_sends_busy_on_identified_link() {
         let blocked = [0x55; 16];
         let mut config = RnphoneConfig::default();
@@ -2767,6 +2899,7 @@ mod tests {
         let mut app = test_app_with_config(config);
         let link_id = link_id(0x56);
 
+        app.handle_network_event(established_link_event(link_id, false));
         app.handle_network_event(remote_identified_event(
             link_id,
             rns_net::IdentityHash(blocked),
@@ -2776,7 +2909,10 @@ mod tests {
         assert_eq!(app.active_link, None);
         assert_eq!(
             app.test_sent_signals,
-            vec![(link_id.0, Signal::Code(SignalCode::Busy))]
+            vec![
+                (link_id.0, Signal::Code(SignalCode::Available)),
+                (link_id.0, Signal::Code(SignalCode::Busy)),
+            ]
         );
         assert_eq!(app.test_torn_down_links, vec![link_id.0]);
         assert_eq!(app.test_ringer_starts, 0);
@@ -2826,6 +2962,23 @@ mod tests {
     }
 
     #[test]
+    fn stale_link_data_does_not_change_active_call_state() {
+        let mut app = test_app();
+        let active_link = link_id(0x78);
+        assert!(app.telephone.begin_outgoing_call([0x79; 16]));
+        app.active_link = Some(active_link.0);
+
+        app.handle_network_event(link_data_signal_on(
+            link_id(0x7A),
+            Signal::Code(SignalCode::Established),
+        ));
+
+        assert_eq!(app.telephone.state(), CallState::Calling);
+        assert!(app.test_sent_signals.is_empty());
+        assert!(app.test_started_audio.is_empty());
+    }
+
+    #[test]
     fn incoming_ringing_signal_does_not_echo_profile() {
         let mut app = test_app();
         let link_id = link_id(0x77);
@@ -2842,9 +2995,13 @@ mod tests {
     fn incoming_established_signal_before_answer_does_not_start_audio() {
         let mut app = test_app();
         let link_id = link_id(0x70);
+        app.handle_network_event(established_link_event(link_id, false));
         app.handle_network_event(remote_identified_event(link_id, identity_hash(0x71)));
 
-        app.handle_network_event(link_data_signal(Signal::Code(SignalCode::Established)));
+        app.handle_network_event(link_data_signal_on(
+            link_id,
+            Signal::Code(SignalCode::Established),
+        ));
 
         assert_eq!(app.telephone.state(), CallState::Ringing);
         assert!(app.test_started_audio.is_empty());
@@ -2859,12 +3016,43 @@ mod tests {
         assert!(app.telephone.begin_outgoing_call(remote));
         app.active_link = Some(link_id.0);
 
-        app.handle_network_event(link_data_signal(Signal::Code(SignalCode::Established)));
-        app.handle_network_event(link_data_signal(Signal::Code(SignalCode::Established)));
+        app.handle_network_event(link_data_signal_on(
+            link_id,
+            Signal::Code(SignalCode::Established),
+        ));
+        app.handle_network_event(link_data_signal_on(
+            link_id,
+            Signal::Code(SignalCode::Established),
+        ));
 
         assert_eq!(app.telephone.state(), CallState::Established);
         assert_eq!(app.test_started_audio, vec![link_id.0]);
         assert!(app.test_call_audio_running);
+    }
+
+    #[test]
+    fn established_preferred_profile_restarts_running_audio_once() {
+        let mut app = test_app();
+        let link_id = link_id(0x7B);
+        assert!(app.telephone.begin_outgoing_call([0x7C; 16]));
+        app.active_link = Some(link_id.0);
+        assert!(app.telephone.establish());
+        app.test_call_audio_running = true;
+
+        app.handle_network_event(link_data_signal_on(
+            link_id,
+            Signal::PreferredProfile(CallProfile::LowLatency),
+        ));
+        app.handle_network_event(link_data_signal_on(
+            link_id,
+            Signal::PreferredProfile(CallProfile::LowLatency),
+        ));
+
+        assert_eq!(app.telephone.active_profile(), CallProfile::LowLatency);
+        assert!(app.test_call_audio_running);
+        assert_eq!(app.test_call_audio_stops, 1);
+        assert_eq!(app.test_started_audio, vec![link_id.0]);
+        assert!(app.test_sent_signals.is_empty());
     }
 
     #[test]
@@ -2876,7 +3064,7 @@ mod tests {
         app.active_link = Some(link_id.0);
         app.test_call_audio_running = true;
 
-        app.handle_network_event(link_data_signal(Signal::Code(SignalCode::Busy)));
+        app.handle_network_event(link_data_signal_on(link_id, Signal::Code(SignalCode::Busy)));
 
         assert_eq!(app.telephone.state(), CallState::Available);
         assert_eq!(app.active_link, None);
@@ -2894,7 +3082,10 @@ mod tests {
         app.active_link = Some(link_id.0);
         app.test_ringer_running = true;
 
-        app.handle_network_event(link_data_signal(Signal::Code(SignalCode::Rejected)));
+        app.handle_network_event(link_data_signal_on(
+            link_id,
+            Signal::Code(SignalCode::Rejected),
+        ));
 
         assert_eq!(app.telephone.state(), CallState::Available);
         assert_eq!(app.active_link, None);
@@ -2945,6 +3136,7 @@ mod tests {
         assert!(!app.test_ringer_running);
         assert_eq!(app.test_call_audio_stops, 1);
         assert_eq!(app.test_ringer_stops, 1);
+        assert_eq!(app.test_output, vec![format!("Link {active} closed")]);
     }
 
     #[test]

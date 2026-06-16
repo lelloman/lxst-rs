@@ -76,9 +76,17 @@ pub enum CallState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CallDirection {
+pub enum CallDirection {
     Incoming,
     Outgoing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallSessionInfo {
+    pub identity_hash: [u8; 16],
+    pub direction: CallDirection,
+    pub state: CallState,
+    pub profile: CallProfile,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -188,6 +196,15 @@ impl Telephone {
 
     pub fn active_profile(&self) -> CallProfile {
         self.active_profile
+    }
+
+    pub fn active_session(&self) -> Option<CallSessionInfo> {
+        Some(CallSessionInfo {
+            identity_hash: self.active_identity?,
+            direction: self.active_direction?,
+            state: self.state,
+            profile: self.active_profile,
+        })
     }
 
     pub fn active_call_is_outgoing(&self) -> bool {

@@ -1,10 +1,10 @@
 use lxst::audio::AudioFilter;
 use lxst::{
     plan_line_source_frame, plan_mixer_frame, Agc, AudioCodec, AudioDeviceKind, AudioFrame,
-    AudioSource, CallProfile, CallState, CallerPolicy, Codec2Codec, CodecError, CodecFactory,
-    CodecSelection, LinePlayback, LineSourceProcessor, Mixer, MixerRuntime, MixerSink, OpusCodec,
-    QueuedLineSink, QueuedLineSinkConfig, RawBitDepth, RawCodec, Signal, SignalCode, Telephone,
-    TelephoneConfig, ToneSource,
+    AudioSource, CallDirection, CallProfile, CallState, CallerPolicy, Codec2Codec, CodecError,
+    CodecFactory, CodecSelection, LinePlayback, LineSourceProcessor, Mixer, MixerRuntime,
+    MixerSink, OpusCodec, QueuedLineSink, QueuedLineSinkConfig, RawBitDepth, RawCodec, Signal,
+    SignalCode, Telephone, TelephoneConfig, ToneSource,
 };
 use lxst_core::CodecProfile;
 use std::sync::{
@@ -1170,6 +1170,28 @@ fn telephone_selects_outgoing_profile_preference() {
         event,
         lxst::telephony::CallEvent::ProfileChanged(CallProfile::HighQuality)
     )));
+}
+
+#[test]
+fn telephone_active_session_reports_public_call_snapshot() {
+    let remote = [0x2A; 16];
+    let (mut telephone, _rx) = Telephone::new(TelephoneConfig::default());
+
+    assert_eq!(telephone.active_session(), None);
+    assert!(telephone.begin_outgoing_call_with_profile(remote, Some(CallProfile::HighQuality)));
+
+    let session = telephone.active_session().unwrap();
+    assert_eq!(session.identity_hash, remote);
+    assert_eq!(session.direction, CallDirection::Outgoing);
+    assert_eq!(session.state, CallState::Calling);
+    assert_eq!(session.profile, CallProfile::HighQuality);
+
+    telephone.apply_signal(Signal::Code(SignalCode::Established));
+    let session = telephone.active_session().unwrap();
+    assert_eq!(session.state, CallState::Established);
+
+    telephone.hangup();
+    assert_eq!(telephone.active_session(), None);
 }
 
 #[test]
